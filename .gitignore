@@ -1,0 +1,6 @@
+/.env
+/.env.*
+!/.env.example
+/config/source_cookies.json
+__pycache__/
+.pytest_cache/
