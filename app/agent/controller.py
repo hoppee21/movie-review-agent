@@ -156,7 +156,7 @@ def next_node(state: AgentState) -> ControllerNode:
     return "finalize"
 
 
-def apply_action_result(state: AgentState) -> AgentState:
+def apply_action_result(state: AgentState) -> dict[str, Any]:
     """Reduce one ActionResult into State and advance, pause, or terminate."""
 
     invocation = state.get("active_action")
@@ -244,16 +244,31 @@ def finalize_state(state: AgentState) -> AgentState:
                 reason=plan.intent.unsupported_reason or "Unsupported request",
             )
         }
+    targets = [
+        MovieTarget.model_validate(target)
+        for target in state.get("movie_targets", [])
+    ]
+    data: dict[str, Any] = {
+        "movie_targets": [target.model_dump(mode="json") for target in targets]
+    }
+    artifacts = state.get("artifacts", {})
+    if plan.intent.task in {TaskType.OPINION_QA, TaskType.PLATFORM_COMPARISON}:
+        target_id = targets[0].target_id
+        target_artifacts = artifacts.get(target_id, {})
+        answer = (
+            target_artifacts.get("answer")
+            if isinstance(target_artifacts, dict)
+            else None
+        )
+        if not isinstance(answer, dict):
+            raise RuntimeError("Completed opinion plan has no final answer")
+        data["answer"] = answer
+    else:
+        data["artifacts"] = artifacts
     return {
         "final_result": RunResult(
             status=RunStatus.COMPLETED,
             task=plan.intent.task,
-            data={
-                "movie_targets": [
-                    MovieTarget.model_validate(target).model_dump(mode="json")
-                    for target in state.get("movie_targets", [])
-                ],
-                "artifacts": state.get("artifacts", {}),
-            },
+            data=data,
         )
     }

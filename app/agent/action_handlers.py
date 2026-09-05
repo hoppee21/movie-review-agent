@@ -1,6 +1,6 @@
 """Adapters from registered Actions to existing Tool contracts and interrupts."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 from langgraph.types import interrupt
@@ -28,13 +28,17 @@ from app.tools.core.wikidata_query_service import WikidataQueryService
 from app.tools.registry import ActionRegistry
 
 
+RegistryExtension = Callable[[ActionRegistry], None]
+
+
 def build_default_registry(
     *,
     resolver: Tool | None = None,
     collector: Tool | None = None,
+    extensions: Iterable[RegistryExtension] = (),
     max_clarification_rounds: int = 3,
 ) -> ActionRegistry:
-    """Register the two existing tools and the internal ask-user action."""
+    """Register core actions, then install optional capability groups."""
 
     if max_clarification_rounds < 1:
         raise ValueError("max_clarification_rounds must be positive")
@@ -56,6 +60,8 @@ def build_default_registry(
         modes={ExecutionMode.EXECUTION},
         handler=_tool_collector_handler(collector),
     )
+    for extension in extensions:
+        extension(registry)
     return registry
 
 
@@ -217,6 +223,8 @@ def _tool_collector_handler(tool: Tool) -> Callable[
         )
         artifacts = dict(state.get("artifacts", {}))
         target_artifacts = dict(artifacts.get(target.target_id, {}))
+        for stale_name in ("rag_index", "retrieval", "answer"):
+            target_artifacts.pop(stale_name, None)
         target_artifacts["reviews"] = result
         artifacts[target.target_id] = target_artifacts
         return ActionResult(

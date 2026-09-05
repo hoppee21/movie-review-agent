@@ -1,6 +1,9 @@
 """Extensible movie Plan-and-Execute runtime with bounded clarification."""
 
-from typing import Any, Literal, Mapping
+from __future__ import annotations
+
+from functools import partial
+from typing import TYPE_CHECKING, Any, Literal, Mapping
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
@@ -24,6 +27,7 @@ from app.agent.movie_state import (
 )
 from app.agent.planner import PlanBuilder, compile_plan
 from app.agent.request_analyzer import RequestAnalyzer
+from app.agent.rag_handlers import register_rag_actions
 from app.agent.resolution import next_resolution_invocation
 from app.agent.schemas import (
     ActionInvocation,
@@ -39,6 +43,9 @@ from app.agent.schemas import (
     TaskType,
 )
 from app.tools.registry import ActionRegistry
+
+if TYPE_CHECKING:
+    from app.rag.runtime import RagRuntime
 
 
 ControllerDestination = Literal[
@@ -59,18 +66,29 @@ class MovieAgent:
         llm: BaseChatModel,
         *,
         action_registry: ActionRegistry | None = None,
+        rag_runtime: RagRuntime | None = None,
         checkpointer: BaseCheckpointSaver | None = None,
         max_clarification_rounds: int = 3,
     ) -> None:
+        if action_registry is not None and rag_runtime is not None:
+            raise ValueError(
+                "Pass either action_registry or rag_runtime, not both"
+            )
         self.movie_analyzer = MovieAnalyzer(llm)
         self.request_analyzer = RequestAnalyzer(llm)
         self.plan_builder = PlanBuilder(llm)
-        self.executor = Executor(
-            action_registry
-            or build_default_registry(
-                max_clarification_rounds=max_clarification_rounds
+        self.rag_runtime = rag_runtime
+        if action_registry is None:
+            extensions = (
+                (partial(register_rag_actions, runtime=rag_runtime),)
+                if rag_runtime is not None
+                else ()
             )
-        )
+            action_registry = build_default_registry(
+                extensions=extensions,
+                max_clarification_rounds=max_clarification_rounds,
+            )
+        self.executor = Executor(action_registry)
         self.graph = self._build_graph(checkpointer)
 
     def _build_graph(
@@ -206,7 +224,7 @@ class MovieAgent:
     def _controller(
         self,
         state: AgentState,
-    ) -> Command[ControllerDestination]:
+    ) -> Command[str]:
         destination = next_node(state)
         update: dict[str, Any] | None = None
         if destination == "execute_action":
@@ -240,7 +258,7 @@ class MovieAgent:
         }
 
     @staticmethod
-    def _apply_result(state: AgentState) -> AgentState:
+    def _apply_result(state: AgentState) -> dict[str, Any]:
         return apply_action_result(state)
 
     @staticmethod

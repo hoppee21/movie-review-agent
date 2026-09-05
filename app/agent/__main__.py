@@ -7,6 +7,7 @@ import json
 from langchain_openai import ChatOpenAI
 
 from app.agent.Agent import MovieAgent
+from app.rag.runtime import build_openai_rag_runtime
 from config import load_openai_api_key
 
 
@@ -20,8 +21,12 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
-    llm = ChatOpenAI(model=args.model, api_key=load_openai_api_key())
-    agent = MovieAgent(llm)
+    api_key = load_openai_api_key()
+    llm = ChatOpenAI(model=args.model, api_key=api_key)
+    agent = MovieAgent(
+        llm,
+        rag_runtime=build_openai_rag_runtime(llm, api_key=api_key),
+    )
     state = await agent.run(args.query, thread_id="cli")
     while pending := state.get("__interrupt__"):
         print(json.dumps(pending[0].value, ensure_ascii=False, indent=2))
