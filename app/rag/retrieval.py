@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections import Counter
 from typing import Any, Protocol, Sequence
 from uuid import uuid4
 
@@ -12,17 +11,19 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 
+from app.progress import progress
 from app.rag.embedding import EmbeddingProvider
+from app.rag.evidence import coverage_report, describe_gap, select_evidence
+from app.rag.movie_context import MOVIE_CONTEXT_GUIDANCE
 from app.rag.index import (
     EphemeralOpinionIndex,
     EphemeralRagStore,
     normalize_query_vectors,
 )
 from app.rag.models import (
-    CoverageReport,
+    CoverageGap,
     HydePassage,
     HydePlan,
-    OpinionStance,
     QueryPurpose,
     QuerySpec,
     RankedEvidence,
@@ -40,21 +41,29 @@ QUERY_SYSTEM_PROMPT = """
 你只为一部电影的评论检索生成语义查询，不选择检索算法或数值参数。
 
 - 豆瓣查询使用中文，IMDb 查询使用英文。
+- 先用 movie_context 确认人物和角色对应，再把用户问题转成观众可能实际使用的词。
+  可扩展背景支持的演员名、角色名和别称；保留不含具体人物名的宽查询，避免只检索主演。
 - 保留用户真正询问的评价方面，并给出少量可辨认的细分方面。
+- subaspects 只列回答问题必需的 2–4 个、互不重叠的中文评价维度，两个平台共用；狭窄问题可更少。
+- 同一维度的查询应同时寻找具体理由、适用条件与反例，避免只改写“好/不好”。
 - 查询要覆盖直接表述、肯定、否定和复杂/矛盾观点；不要预设结论。
 - 每条查询绑定 imdb 或 douban，以及 primary/exact/subaspect/positive/negative/mixed 之一。
 - 不生成电影事实检索，不回答问题，不引用并不存在的评论。
-""".strip()
+""".strip() + "\n\n" + MOVIE_CONTEXT_GUIDANCE
 
 
 HYDE_SYSTEM_PROMPT = """
 你为召回不足的电影评论检索生成假设性段落。它们只作为 dense retrieval 查询，绝不是证据。
 
-- IMDb 用英文，豆瓣用中文。
-- 同时覆盖肯定、否定和复杂观点，避免只生成单一立场。
-- 紧扣用户所问方面和缺失的细分方面。
+- 每条段落绑定给定缺口的 gap_index；IMDb 用英文，豆瓣用中文，不能跨用平台或评价对象。
+- reason 缺口要寻找评论原文明示的理由或条件；comparison 缺口要查同一对象、同一维度。
+- subaspect 缺口寻找该维度的直接评价；reviews 缺口寻找更多独立评论。
+- 参考已有观点，补足缺少的信息，避免重复泛泛好坏。可使用不同立场，不预设必须存在反例。
+- 用 movie_context 核对缺口中的人物/角色和措辞。背景中的事实不会填平评论证据缺口；
+  不把百科对表演的评价改写成假设评论，也不把角色经历写成演员表演得到认可的原因。
+- 只针对给定缺口生成；有多个缺口时优先分别覆盖，不对同一个缺口反复改写。
 - 不声称这些文字来自真实用户，也不要使用具体用户、评分或数量。
-""".strip()
+""".strip() + "\n\n" + MOVIE_CONTEXT_GUIDANCE
 
 
 class RetrievalQueryPlanner(Protocol):
@@ -64,6 +73,7 @@ class RetrievalQueryPlanner(Protocol):
         question: str,
         aspect: str | None,
         platforms: Sequence[ReviewPlatform],
+        movie_context: str = "",
     ) -> RetrievalQueryPlan: ...
 
 
@@ -73,8 +83,9 @@ class HydeGenerator(Protocol):
         *,
         question: str,
         aspect: str | None,
-        platforms: Sequence[ReviewPlatform],
-        missing_subaspects: Sequence[str],
+        gaps: Sequence[CoverageGap],
+        evidence: Sequence[RankedEvidence],
+        movie_context: str = "",
     ) -> HydePlan: ...
 
 
@@ -86,6 +97,7 @@ class LLMRetrievalQueryPlanner:
                 (
                     "human",
                     "用户问题：{question}\n"
+                    "movie_context（电影背景）：\n{movie_context}\n\n"
                     "明确方面：{aspect}\n"
                     "目标平台：{platforms}",
                 ),
@@ -104,14 +116,17 @@ class LLMRetrievalQueryPlanner:
         question: str,
         aspect: str | None,
         platforms: Sequence[ReviewPlatform],
+        movie_context: str = "",
     ) -> RetrievalQueryPlan:
-        value = await self._chain.ainvoke(
-            {
-                "question": question,
-                "aspect": aspect or "未单独指定，以用户问题为准",
-                "platforms": ", ".join(platforms),
-            }
-        )
+        with progress("生成评论检索查询"):
+            value = await self._chain.ainvoke(
+                {
+                    "question": question,
+                    "movie_context": movie_context or "未提供电影背景",
+                    "aspect": aspect or "未单独指定，以用户问题为准",
+                    "platforms": ", ".join(platforms),
+                }
+            )
         return RetrievalQueryPlan.model_validate(_model_data(value))
 
 
@@ -123,9 +138,10 @@ class LLMHydeGenerator:
                 (
                     "human",
                     "用户问题：{question}\n"
+                    "movie_context（电影背景）：\n{movie_context}\n\n"
                     "明确方面：{aspect}\n"
-                    "需要补充的平台：{platforms}\n"
-                    "尚未覆盖的细分方面：{missing_subaspects}",
+                    "具体缺口（编号必须原样使用）：\n{gaps}\n\n"
+                    "已有观点（供确定检索方向）：\n{evidence}",
                 ),
             ]
         )
@@ -141,17 +157,23 @@ class LLMHydeGenerator:
         *,
         question: str,
         aspect: str | None,
-        platforms: Sequence[ReviewPlatform],
-        missing_subaspects: Sequence[str],
+        gaps: Sequence[CoverageGap],
+        evidence: Sequence[RankedEvidence],
+        movie_context: str = "",
     ) -> HydePlan:
-        value = await self._chain.ainvoke(
-            {
-                "question": question,
-                "aspect": aspect or "未单独指定，以用户问题为准",
-                "platforms": ", ".join(platforms),
-                "missing_subaspects": ", ".join(missing_subaspects) or "无",
-            }
-        )
+        with progress(f"为 {len(gaps)} 项覆盖缺口生成补检索查询"):
+            value = await self._chain.ainvoke(
+                {
+                    "question": question,
+                    "movie_context": movie_context or "未提供电影背景",
+                    "aspect": aspect or "未单独指定，以用户问题为准",
+                    "gaps": "\n".join(f"{i}. {describe_gap(gap)}" for i, gap in enumerate(gaps, 1)),
+                    "evidence": "\n".join(
+                        f"{item.platform} / {item.target} / {item.subaspect}: {item.opinion}"
+                        for item in evidence
+                    ),
+                }
+            )
         return HydePlan.model_validate(_model_data(value))
 
 
@@ -181,6 +203,7 @@ class OpinionRetriever:
         question: str,
         aspect: str | None,
         platforms: Sequence[ReviewPlatform],
+        movie_context: str = "",
     ) -> RetrievalArtifact:
         selected_platforms = list(dict.fromkeys(platforms))
         if not selected_platforms:
@@ -190,6 +213,7 @@ class OpinionRetriever:
             question=question,
             aspect=aspect,
             platforms=selected_platforms,
+            movie_context=movie_context,
         )
         query_plan = self._sanitize_query_plan(
             raw_plan,
@@ -199,11 +223,18 @@ class OpinionRetriever:
         )
         fusion = await self._hybrid_fusion(index, query_plan.queries)
         candidates = self._candidates(index, fusion, selected_platforms)
-        evidence = await self._rerank(
+        pool = await self.reranker.rerank(
             question=question,
             aspect=aspect,
             candidates=candidates,
-            platforms=selected_platforms,
+            subaspects=query_plan.subaspects,
+            movie_context=movie_context,
+        )
+        seen_chunks = {item.chunk_id for item in candidates}
+        evidence = select_evidence(
+            pool, platforms=selected_platforms,
+            limit_per_platform=self.config.final_evidence_per_platform,
+            minimum_reviews=self.config.min_relevant_per_platform,
         )
         coverage = coverage_report(
             evidence,
@@ -213,30 +244,31 @@ class OpinionRetriever:
         )
         rounds = 1
 
-        if (
-            not coverage.sufficient
-            and self.config.max_retrieval_rounds > 1
-            and index.chunks
-        ):
+        available_platforms = {chunk.platform for chunk in index.chunks if chunk.chunk_id not in seen_chunks}
+        gaps = [gap for gap in coverage.gaps if gap.platform in available_platforms]
+        if gaps and self.config.max_retrieval_rounds > 1:
             hyde_plan = await self.hyde_generator.generate(
                 question=question,
                 aspect=aspect,
-                platforms=selected_platforms,
-                missing_subaspects=coverage.missing_subaspects,
+                gaps=gaps,
+                evidence=evidence,
+                movie_context=movie_context,
             )
-            passages = self._sanitize_hyde(
-                hyde_plan.passages,
-                selected_platforms,
-            )
+            passages = self._sanitize_hyde(hyde_plan.passages, gaps)
             if passages:
-                fallback = await self._hyde_fusion(index, passages)
-                _merge_fusion(fusion, fallback)
-                candidates = self._candidates(index, fusion, selected_platforms)
-                evidence = await self._rerank(
-                    question=question,
-                    aspect=aspect,
-                    candidates=candidates,
-                    platforms=selected_platforms,
+                fallback = await self._hyde_fusion(index, passages, gaps, seen_chunks)
+                candidates = self._candidates(index, fallback, selected_platforms)
+                if candidates:
+                    pool.extend(await self.reranker.rerank(
+                        question=question, aspect=aspect, candidates=candidates,
+                        subaspects=query_plan.subaspects,
+                        known_targets=list(dict.fromkeys(item.target for item in pool)),
+                        movie_context=movie_context,
+                    ))
+                evidence = select_evidence(
+                    pool, platforms=selected_platforms,
+                    limit_per_platform=self.config.final_evidence_per_platform,
+                    minimum_reviews=self.config.min_relevant_per_platform,
                 )
                 coverage = coverage_report(
                     evidence,
@@ -251,6 +283,7 @@ class OpinionRetriever:
             index_id=index_id,
             question=question,
             platforms=selected_platforms,
+            movie_context=movie_context,
             query_plan=query_plan,
             evidence=evidence,
             coverage=coverage,
@@ -287,7 +320,7 @@ class OpinionRetriever:
                 )
         return RetrievalQueryPlan(
             aspect=aspect if aspect is not None else plan.aspect,
-            subaspects=plan.subaspects,
+            subaspects=plan.subaspects or [aspect or plan.aspect or "整体评价"],
             queries=queries,
         )
 
@@ -332,6 +365,8 @@ class OpinionRetriever:
         self,
         index: EphemeralOpinionIndex,
         passages: Sequence[HydePassage],
+        gaps: Sequence[CoverageGap],
+        seen_chunks: set[str],
     ) -> dict[int, float]:
         fusion: dict[int, float] = {}
         vectors = normalize_query_vectors(
@@ -340,7 +375,9 @@ class OpinionRetriever:
             expected_dimension=index.dense_vectors.shape[1],
         )
         for passage, vector in zip(passages, vectors, strict=True):
-            allowed = index.platform_indices.get(passage.platform, ())
+            platform = gaps[passage.gap_index - 1].platform
+            allowed = [i for i in index.platform_indices.get(platform, ())
+                       if index.chunks[i].chunk_id not in seen_chunks]
             _add_ranking(
                 fusion,
                 _dense_search(
@@ -369,12 +406,8 @@ class OpinionRetriever:
                 ),
                 key=lambda item: (-item[1], item[0]),
             )
-            seen_reviews: set[str] = set()
-            for chunk_index, value in ranked_indices:
+            for chunk_index, value in ranked_indices[: self.config.candidate_cap_per_platform]:
                 chunk = index.chunks[chunk_index]
-                if chunk.review_id in seen_reviews:
-                    continue
-                seen_reviews.add(chunk.review_id)
                 document = index.documents[chunk.review_id]
                 result.append(
                     RetrievalCandidate(
@@ -389,38 +422,25 @@ class OpinionRetriever:
                         fusion_score=value,
                     )
                 )
-                if len(seen_reviews) >= self.config.candidate_cap_per_platform:
-                    break
         return result
-
-    async def _rerank(
-        self,
-        *,
-        question: str,
-        aspect: str | None,
-        candidates: Sequence[RetrievalCandidate],
-        platforms: Sequence[ReviewPlatform],
-    ) -> list[RankedEvidence]:
-        ranked = await self.reranker.rerank(
-            question=question,
-            aspect=aspect,
-            candidates=candidates,
-        )
-        kept: list[RankedEvidence] = []
-        for platform in platforms:
-            platform_items = [item for item in ranked if item.platform == platform]
-            kept.extend(platform_items[: self.config.rerank_top_n_per_platform])
-        return kept
 
     def _sanitize_hyde(
         self,
         passages: Sequence[HydePassage],
-        platforms: Sequence[ReviewPlatform],
+        gaps: Sequence[CoverageGap],
     ) -> list[HydePassage]:
         result: list[HydePassage] = []
-        for platform in platforms:
-            matching = [item for item in passages if item.platform == platform]
-            result.extend(matching[: self.config.hyde_variants])
+        counts: dict[str, int] = {}
+        seen = set()
+        for passage in passages:
+            if passage.gap_index > len(gaps):
+                raise ValueError("HyDE passage references an unknown coverage gap")
+            platform = gaps[passage.gap_index - 1].platform
+            key = (platform, passage.text.casefold())
+            if key not in seen and counts.get(platform, 0) < self.config.hyde_variants:
+                result.append(passage)
+                seen.add(key)
+                counts[platform] = counts.get(platform, 0) + 1
         return result
 
     def _first_stage_k(self, platform_count: int) -> int:
@@ -431,93 +451,6 @@ class OpinionRetriever:
             math.ceil(platform_count * self.config.first_stage_ratio),
         )
         return min(platform_count, self.config.first_stage_max_k, requested)
-
-
-def coverage_report(
-    evidence: Sequence[RankedEvidence],
-    *,
-    platforms: Sequence[ReviewPlatform],
-    subaspects: Sequence[str],
-    minimum: int,
-) -> CoverageReport:
-    """Measure review-level evidence coverage, separately for each platform."""
-
-    relevant = _unique_relevant_reviews(evidence)
-    by_platform = Counter(item.platform for item in relevant)
-    stance_counts: dict[str, dict[str, int]] = {}
-    for platform in platforms:
-        counts = Counter(
-            item.stance.value
-            for item in relevant
-            if item.platform == platform
-        )
-        stance_counts[platform] = {
-            stance.value: counts.get(stance.value, 0)
-            for stance in OpinionStance
-        }
-
-    observed = [item.subaspect for item in relevant if item.subaspect]
-    covered = [
-        expected
-        for expected in subaspects
-        if any(_same_aspect(expected, actual) for actual in observed)
-    ]
-    missing_subaspects = [item for item in subaspects if item not in covered]
-    missing_platforms = [
-        platform
-        for platform in platforms
-        if by_platform.get(platform, 0) < minimum
-    ]
-    no_subaspect_hit = bool(subaspects) and not covered
-    sufficient = not missing_platforms and not no_subaspect_hit
-    reasons: list[str] = []
-    if missing_platforms:
-        reasons.append(
-            "直接相关评论不足的平台：" + ", ".join(missing_platforms)
-        )
-    if no_subaspect_hit:
-        reasons.append(
-            "没有直接证据覆盖问题拆出的细分方面："
-            + ", ".join(missing_subaspects)
-        )
-    return CoverageReport(
-        sufficient=sufficient,
-        relevant_by_platform={
-            platform: by_platform.get(platform, 0)
-            for platform in platforms
-        },
-        stance_counts=stance_counts,
-        covered_subaspects=covered,
-        missing_subaspects=missing_subaspects,
-        missing_platforms=missing_platforms,
-        reason="；".join(reasons) or None,
-    )
-
-
-def _unique_relevant_reviews(
-    evidence: Sequence[RankedEvidence],
-) -> list[RankedEvidence]:
-    seen: set[tuple[str, str]] = set()
-    result: list[RankedEvidence] = []
-    for item in sorted(
-        evidence,
-        key=lambda value: (
-            -value.relevance,
-            -value.evidence_quality,
-            -value.fusion_score,
-        ),
-    ):
-        key = (item.platform, item.review_id)
-        if item.relevance >= 2 and key not in seen:
-            seen.add(key)
-            result.append(item)
-    return result
-
-
-def _same_aspect(expected: str, observed: str) -> bool:
-    left = expected.strip().casefold()
-    right = observed.strip().casefold()
-    return bool(left and right and (left in right or right in left))
 
 
 def _dense_search(
@@ -546,14 +479,6 @@ def _add_ranking(
         )
 
 
-def _merge_fusion(
-    base: dict[int, float],
-    addition: dict[int, float],
-) -> None:
-    for chunk_index, value in addition.items():
-        base[chunk_index] = base.get(chunk_index, 0.0) + value
-
-
 def _model_data(value: dict[str, Any] | BaseModel) -> dict[str, Any]:
     if isinstance(value, BaseModel):
         return value.model_dump()
@@ -566,5 +491,4 @@ __all__ = [
     "LLMRetrievalQueryPlanner",
     "OpinionRetriever",
     "RetrievalQueryPlanner",
-    "coverage_report",
 ]

@@ -25,6 +25,7 @@ class QueryMovieOpinions(Tool):
         artifact = await self.retriever.retrieve(
             index_id=value.index_id,
             question=value.question,
+            movie_context=value.movie_context,
             aspect=value.aspect,
             platforms=value.platforms,
         )

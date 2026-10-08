@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 from collections import Counter, defaultdict
@@ -27,6 +28,7 @@ from config import RagConfig
 
 _TOKEN_PATTERN = re.compile(r"[a-z0-9]+|[\u3400-\u4dbf\u4e00-\u9fff]+")
 _WHITESPACE = re.compile(r"\s+")
+logger = logging.getLogger(__name__)
 
 
 def tokenize(text: str) -> list[str]:
@@ -263,6 +265,7 @@ class OpinionIndexBuilder:
                     )
                 )
 
+        logger.info("已整理 %d 条独立评论，切分为 %d 个片段", len(documents), len(chunks))
         vectors = await self.embedder.embed_documents(
             [chunk.embed_text for chunk in chunks]
         )

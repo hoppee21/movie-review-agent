@@ -3,6 +3,7 @@
 from typing import Protocol
 
 from langchain_core.embeddings import Embeddings
+from app.progress import progress
 
 
 class EmbeddingProvider(Protocol):
@@ -34,11 +35,11 @@ class LangChainEmbeddingProvider:
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         vectors: list[list[float]] = []
         for start in range(0, len(texts), self.batch_size):
-            vectors.extend(
-                await self._embeddings.aembed_documents(
-                    texts[start : start + self.batch_size]
+            end = min(start + self.batch_size, len(texts))
+            with progress(f"向量化片段 {start + 1}–{end}/{len(texts)}"):
+                vectors.extend(
+                    await self._embeddings.aembed_documents(texts[start:end])
                 )
-            )
         return vectors
 
     async def embed_queries(self, texts: list[str]) -> list[list[float]]:

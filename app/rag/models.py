@@ -116,9 +116,15 @@ class RetrievalQueryPlan(BaseModel):
         return unique
 
 
-class HydePassage(BaseModel):
+class CoverageGap(BaseModel):
     platform: ReviewPlatform
-    stance: OpinionStance
+    kind: Literal["reviews", "subaspect", "reason", "comparison"]
+    subaspect: str | None = None
+    target: str | None = None
+
+
+class HydePassage(BaseModel):
+    gap_index: int = Field(ge=1, description="One-based index of the supplied coverage gap.")
     text: str = Field(min_length=1, max_length=1500)
 
     @field_validator("text")
@@ -130,7 +136,7 @@ class HydePassage(BaseModel):
 
 
 class HydePlan(BaseModel):
-    passages: list[HydePassage] = Field(min_length=1, max_length=6)
+    passages: list[HydePassage] = Field(max_length=6)
 
 
 class RetrievalCandidate(BaseModel):
@@ -145,38 +151,54 @@ class RetrievalCandidate(BaseModel):
     fusion_score: float
 
 
+class OpinionUnit(BaseModel):
+    """One judgement about one target and dimension, grounded in a literal span."""
+
+    target: str = Field(min_length=1, max_length=120)
+    subaspect: str = Field(min_length=1, max_length=120)
+    opinion: str = Field(min_length=1, max_length=400)
+    relevance: int = Field(ge=0, le=3)
+    stance: OpinionStance
+    reason: str | None = Field(
+        max_length=600,
+        description="Literal reason or condition within evidence_span; null for bare judgements.",
+    )
+    evidence_span: str = Field(min_length=1, max_length=800)
+
+    @field_validator("target", "subaspect", "opinion", "evidence_span")
+    @classmethod
+    def clean_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("opinion fields cannot be blank")
+        return value.strip()
+
+    @field_validator("reason")
+    @classmethod
+    def clean_reason(cls, value: str | None) -> str | None:
+        return value.strip() if value and value.strip() else None
+
+    @property
+    def evidence_quality(self) -> int:
+        return 2 if self.reason and self.reason in self.evidence_span else 1
+
+
 class RerankJudgement(BaseModel):
     chunk_id: str
-    relevance: int = Field(ge=0, le=3)
-    evidence_quality: int = Field(ge=0, le=2)
-    stance: OpinionStance
-    subaspect: str | None = Field(max_length=80)
-    evidence_span: str | None = Field(max_length=600)
+    opinions: list[OpinionUnit] = Field(max_length=6)
 
 
 class RerankResponse(BaseModel):
     items: list[RerankJudgement]
 
 
-class RankedEvidence(BaseModel):
+class RankedEvidence(RetrievalCandidate, OpinionUnit):
+    """An opinion with its source metadata; one chunk may produce several units."""
+
     evidence_id: str
-    chunk_id: str
-    review_id: str
-    platform: ReviewPlatform
-    chunk_text: str
-    full_text: str
-    title: str | None = None
-    rating: float | None = None
-    helpful_votes: int | None = None
-    fusion_score: float
-    relevance: int = Field(ge=0, le=3)
-    evidence_quality: int = Field(ge=0, le=2)
-    stance: OpinionStance
-    subaspect: str | None
-    evidence_span: str | None
 
 
 class CoverageReport(BaseModel):
+    minimum_reviews: int = Field(ge=1)
     sufficient: bool
     relevant_by_platform: dict[str, int]
     stance_counts: dict[str, dict[str, int]]
@@ -184,12 +206,15 @@ class CoverageReport(BaseModel):
     missing_subaspects: list[str]
     missing_platforms: list[str]
     reason: str | None
+    missing_subaspects_by_platform: dict[str, list[str]] = Field(default_factory=dict)
+    gaps: list[CoverageGap] = Field(default_factory=list)
 
 
 class RetrievalResult(BaseModel):
     retrieval_id: str
     index_id: str
     question: str = Field(min_length=1)
+    movie_context: str = ""
     platforms: list[ReviewPlatform] = Field(min_length=1, max_length=2)
     query_plan: RetrievalQueryPlan
     evidence: list[RankedEvidence]
@@ -215,6 +240,10 @@ class QueryOpinionsInput(BaseModel):
     question: str = Field(
         min_length=1,
         description="Movie-opinion question produced by RequestAnalyzer.",
+    )
+    movie_context: str = Field(
+        default="",
+        description="Shared, source-attributed movie background; never audience-review evidence.",
     )
     aspect: str | None = Field(
         description="Explicit evaluation aspect from PlanIntent, or null.",
@@ -270,25 +299,57 @@ class AggregateOpinionsInput(BaseModel):
         return value.strip()
 
 
-class OpinionClusterDraft(BaseModel):
-    label: str = Field(min_length=1)
-    summary: str = Field(min_length=1)
-    stance: OpinionStance
-    platforms: list[ReviewPlatform]
-    evidence_ids: list[str]
+class AnswerClaim(BaseModel):
+    """One reviewable statement, before it is placed in the public answer."""
+
+    kind: Literal["finding", "insight", "comparison"]
+    statement: str = Field(min_length=1, max_length=600)
+    reasoning: str | None = Field(max_length=1000)
+    evidence_ids: list[str] = Field(min_length=1, max_length=24)
+    counterevidence_ids: list[str] = Field(max_length=24)
+    limitation: str | None = Field(max_length=400)
 
 
 class AggregationDraft(BaseModel):
-    conclusion: str = Field(min_length=1)
-    clusters: list[OpinionClusterDraft]
-    platform_comparison: str | None
-    limitations: list[str]
+    claims: list[AnswerClaim] = Field(max_length=12)
+
+
+class ClaimReview(BaseModel):
+    claim_id: str
+    verdict: Literal["keep", "revise", "drop"]
+    reason: str = Field(min_length=1, max_length=400)
+    replacement: AnswerClaim | None
+
+
+class ClaimAudit(BaseModel):
+    invalid_evidence_ids: list[str] = Field(
+        description="Evidence unrelated to the question or misattributed to its target/dimension."
+    )
+    unsupported_reason_ids: list[str] = Field(
+        description="Relevant evidence whose reason is only a judgement, plot description or invented explanation; clear the reason, retain the opinion."
+    )
+    reviews: list[ClaimReview] = Field(max_length=12)
+
+
+class OpinionInsight(BaseModel):
+    claim: str = Field(min_length=1, description="证据支持的分析判断，不是情绪分类。")
+    reasoning: str = Field(min_length=1, description="解释评价标准、分歧或条件；推断须明确标注。")
+    evidence_ids: list[str] = Field(min_length=1)
+    counterevidence_ids: list[str]
+    limitation: str = Field(min_length=1, description="反例、替代解释或不能推出的结论。")
 
 
 class EvidenceCard(BaseModel):
+    citation_id: str = Field(description="Answer-local short citation, mapped to the persistent evidence_id.")
     evidence_id: str
+    chunk_id: str
     platform: ReviewPlatform
     review_id: str
+    target: str
+    subaspect: str
+    opinion: str
+    stance: OpinionStance
+    reason: str | None
     quote: str
     full_text: str
     rating: float | None = None
@@ -305,15 +366,19 @@ class OpinionCluster(BaseModel):
         description="Distinct cited reviews in this cluster, not population size.",
     )
     evidence_ids: list[str]
+    counterevidence_ids: list[str] = Field(default_factory=list)
 
 
 class MovieAnswer(BaseModel):
     conclusion: str
+    conclusion_evidence_ids: list[str] = Field(default_factory=list)
     clusters: list[OpinionCluster]
+    insights: list[OpinionInsight] = Field(default_factory=list, max_length=4)
     stance_counts: dict[str, dict[str, int]] = Field(
-        description="Counts among retrieved reviews judged directly relevant."
+        description="Distinct reviews in the final evidence; conflicting opinions count as mixed."
     )
     platform_comparison: str | None
+    platform_comparison_evidence_ids: list[str] = Field(default_factory=list)
     evidence: list[EvidenceCard]
     coverage: CoverageReport
     limitations: list[str]

@@ -1,6 +1,36 @@
+# Local credentials
 /.env
 /.env.*
 !/.env.example
 /config/source_cookies.json
+
+# Local environments and IDE files
+/.idea/
+/.vscode/
+/.venv/
+/venv/
+.DS_Store
+
+# Development tests, diagnostics and collected data stay local
+/tests/
+/frontend/tests/
+/reports/
+/output/
+/.playwright-cli/
+/movie_reviews/
+/rawmovie_reviews/
+/imdb_reviews_*.json
+/douban_reviews_*.json
+
+# Generated caches and build outputs
 __pycache__/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.log
+*.tsbuildinfo
+node_modules/
+frontend/dist/

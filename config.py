@@ -10,6 +10,8 @@ from dotenv import dotenv_values
 PROJECT_ROOT = Path(__file__).resolve().parent
 ENV_CONFIG_PATH = PROJECT_ROOT / ".env.local"
 COOKIE_CONFIG_PATH = PROJECT_ROOT / "config" / "source_cookies.json"
+API_TIMEOUT_SECONDS = 180.0
+API_MAX_RETRIES = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +32,6 @@ class RagConfig:
     rrf_k: int = 60
     candidate_cap_per_platform: int = 80
     rerank_batch_size: int = 12
-    rerank_top_n_per_platform: int = 40
     final_evidence_per_platform: int = 12
     min_relevant_per_platform: int = 6
     max_retrieval_rounds: int = 2
@@ -47,7 +48,6 @@ class RagConfig:
             "rrf_k",
             "candidate_cap_per_platform",
             "rerank_batch_size",
-            "rerank_top_n_per_platform",
             "final_evidence_per_platform",
             "min_relevant_per_platform",
             "max_retrieval_rounds",
@@ -73,20 +73,9 @@ class RagConfig:
             raise ValueError(
                 "first_stage_min_k cannot exceed first_stage_max_k"
             )
-        if self.rerank_top_n_per_platform > self.candidate_cap_per_platform:
+        if self.min_relevant_per_platform > self.final_evidence_per_platform:
             raise ValueError(
-                "rerank_top_n_per_platform cannot exceed "
-                "candidate_cap_per_platform"
-            )
-        if self.final_evidence_per_platform > self.rerank_top_n_per_platform:
-            raise ValueError(
-                "final_evidence_per_platform cannot exceed "
-                "rerank_top_n_per_platform"
-            )
-        if self.min_relevant_per_platform > self.rerank_top_n_per_platform:
-            raise ValueError(
-                "min_relevant_per_platform cannot exceed "
-                "rerank_top_n_per_platform"
+                "min_relevant_per_platform cannot exceed final_evidence_per_platform"
             )
         if self.max_retrieval_rounds > 2:
             raise ValueError("max_retrieval_rounds cannot exceed 2")

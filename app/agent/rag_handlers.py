@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -13,10 +15,13 @@ from app.agent.schemas import (
     AgentState,
     ExecutionMode,
     ExecutionPlan,
+    MovieTarget,
     PatchAuthority,
     RequestAnalysis,
     StatePatch,
 )
+from app.rag.movie_context import load_movie_context
+from app.progress import progress
 from app.tools.core.aggregate_movie_opinions import AggregateMovieOpinions
 from app.tools.core.build_opinion_index import BuildOpinionIndex
 from app.tools.core.query_movie_opinions import QueryMovieOpinions
@@ -31,6 +36,7 @@ ActionHandler = Callable[
     [ActionInvocation, AgentState],
     Awaitable[ActionResult],
 ]
+logger = logging.getLogger(__name__)
 
 
 def register_rag_actions(registry: ActionRegistry, runtime: RagRuntime) -> None:
@@ -95,10 +101,23 @@ def _query_handler(tool: Tool) -> ActionHandler:
             raise RuntimeError("query_movie_opinions requires a RAG index")
         request = RequestAnalysis.model_validate(state.get("request_analysis"))
         plan = ExecutionPlan.model_validate(state.get("execution_plan"))
+        target = next(
+            target for target in map(MovieTarget.model_validate, state["movie_targets"])
+            if target.target_id == target_id
+        )
+        movie_context = ""
+        if target.wikidata_id:
+            try:
+                with progress("读取维基百科电影背景"):
+                    movie_context = await asyncio.to_thread(load_movie_context, target.wikidata_id)
+                logger.info("电影背景已准备：%d 字符", len(movie_context))
+            except (OSError, ValueError, KeyError) as exc:
+                logger.warning("电影背景暂不可用 (%s)：%s", target.wikidata_id, exc)
         result = await tool.execute(
             {
                 "index_id": index_id,
                 "question": request.question,
+                "movie_context": movie_context,
                 "aspect": plan.intent.aspect,
                 "platforms": plan.intent.platforms,
             }

@@ -224,7 +224,7 @@ class MovieAgent:
     def _controller(
         self,
         state: AgentState,
-    ) -> Command[str]:
+    ) -> Command[ControllerDestination]:
         destination = next_node(state)
         update: dict[str, Any] | None = None
         if destination == "execute_action":

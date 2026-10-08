@@ -18,7 +18,14 @@ OUTPUT_FILE = "imdb_top400_reviews.json"
 
 PROFILE_DIR = "imdb_profile"
 LOAD_DELAY_SECONDS = 5
+LOAD_RETRY_DELAY_MS = 2_000
+LOAD_GROWTH_TIMEOUT_MS = 30_000
+MAX_IDLE_LOAD_ROUNDS = 3
 REVIEW_SELECTOR = "[data-testid='review-card-parent']"
+LOAD_BUTTON_SELECTOR = (
+    "button[data-testid='load-more-trigger'], "
+    "button.ipc-see-more__button"
+)
 
 
 class GetImdbReviews(Tool):
@@ -115,36 +122,73 @@ def reviews_url(imdb_url: str) -> str:
     )
 
 
-async def load_reviews(page: Page, limit: int) -> None:
-    """Click IMDb's load-more button until the target or page end."""
+async def load_reviews(page: Page, limit: int) -> int:
+    """Load reviews until the target or three consecutive idle rounds."""
 
-    while await page.locator(REVIEW_SELECTOR).count() < limit:
-        button = await find_load_button(page)
-        if button is None:
-            return
-
+    idle_rounds = 0
+    while True:
         previous = await page.locator(REVIEW_SELECTOR).count()
-        await button.scroll_into_view_if_needed()
-        await button.click(timeout=15_000)
+        if previous >= limit:
+            return previous
 
-        try:
-            await page.wait_for_function(
-                f"document.querySelectorAll({REVIEW_SELECTOR!r}).length > {previous}",
-                timeout=30_000,
-            )
-        except TimeoutError:
-            return
-        await asyncio.sleep(LOAD_DELAY_SECONDS)
+        button = await find_load_button(page)
+        if button is not None:
+            try:
+                await button.scroll_into_view_if_needed()
+                await button.click(timeout=15_000)
+                await page.wait_for_function(
+                    f"document.querySelectorAll({REVIEW_SELECTOR!r}).length "
+                    f"> {previous}",
+                    timeout=LOAD_GROWTH_TIMEOUT_MS,
+                )
+            except TimeoutError:
+                pass
+
+        current = await page.locator(REVIEW_SELECTOR).count()
+        if current > previous:
+            idle_rounds = 0
+            await asyncio.sleep(LOAD_DELAY_SECONDS)
+            continue
+
+        idle_rounds += 1
+        if idle_rounds >= MAX_IDLE_LOAD_ROUNDS:
+            return current
+        await wait_before_load_retry(page)
 
 
 async def find_load_button(page: Page) -> Optional[Locator]:
-    buttons = page.locator("button.ipc-see-more__button")
+    buttons = page.locator(LOAD_BUTTON_SELECTOR)
     for index in range(await buttons.count() - 1, -1, -1):
         button = buttons.nth(index)
-        label = (await button.inner_text()).strip().lower()
-        if "see all" in label or re.search(r"\d+\s+more", label):
+        if not await button.is_visible():
+            continue
+        if await button.get_attribute("data-testid") == "load-more-trigger":
+            return button
+        label = " ".join(
+            value
+            for value in (
+                await button.inner_text(),
+                await button.get_attribute("aria-label"),
+            )
+            if value
+        ).strip().lower()
+        if (
+            "load more" in label
+            or "see all" in label
+            or "more reviews" in label
+            or re.search(r"\d+\s+more", label)
+        ):
             return button
     return None
+
+
+async def wait_before_load_retry(page: Page) -> None:
+    """Scroll to the last review so a delayed load button can render."""
+
+    cards = page.locator(REVIEW_SELECTOR)
+    if await cards.count():
+        await cards.last.scroll_into_view_if_needed()
+    await page.wait_for_timeout(LOAD_RETRY_DELAY_MS)
 
 
 async def parse_reviews(

@@ -8,6 +8,7 @@ from app.agent.schemas import (
     AgentState,
 )
 from app.tools.registry import ActionRegistry
+from app.progress import progress
 
 
 class Executor:
@@ -28,7 +29,8 @@ class Executor:
                 status=ActionStatus.NOT_IMPLEMENTED,
                 output={"action": invocation.step.action.value},
             )
-        return await registration.handler(invocation, state)
+        with progress(f"阶段 {invocation.step.action.value}"):
+            return await registration.handler(invocation, state)
 
 
 __all__ = ["Executor", "build_default_registry"]
