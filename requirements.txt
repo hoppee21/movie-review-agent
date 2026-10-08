@@ -1,0 +1,12 @@
+# Runtime dependencies verified in the local Agent Python 3.12 environment.
+langgraph==1.2.11
+langchain-core==1.6.1
+langchain-openai==1.2.2
+openai==2.34.0
+pydantic==2.13.3
+numpy==2.5.2
+beautifulsoup4==4.15.0
+python-dotenv==1.2.2
+playwright==1.62.0
+httpx==0.28.1
+-r requirements-web.txt
