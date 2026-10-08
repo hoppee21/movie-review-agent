@@ -12,6 +12,8 @@
 .DS_Store
 
 # Development tests, diagnostics and collected data stay local
+/frontend/README.md
+/app/agent/README.md
 /tests/
 /frontend/tests/
 /reports/
