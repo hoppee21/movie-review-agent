@@ -11,6 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 
 from app.progress import progress
+from app.run_log import record_event
 from app.rag.movie_context import MOVIE_CONTEXT_GUIDANCE
 from app.rag.models import (
     RankedEvidence,
@@ -111,33 +112,30 @@ class LLMOpinionReranker:
             batch_by_id = {str(index): item for index, item in enumerate(batch, 1)}
             batch_number = start // self.batch_size + 1
             total_batches = (len(candidates) + self.batch_size - 1) // self.batch_size
+            payload = {
+                "question": question,
+                "movie_context": movie_context or "未提供电影背景",
+                "aspect": aspect or "未指定，按用户问题判断",
+                "subaspects": json.dumps(list(subaspects), ensure_ascii=False),
+                "known_targets": json.dumps(list(dict.fromkeys([
+                    *known_targets, *(opinion.target for item in judgements.values()
+                                      for opinion in item.opinions if opinion.relevance >= 2),
+                ])), ensure_ascii=False),
+                "candidates": json.dumps([
+                    {"chunk_id": local_id, "platform": item.platform, "chunk_text": item.chunk_text}
+                    for local_id, item in batch_by_id.items()
+                ], ensure_ascii=False),
+            }
+            record_event("rag.rerank_batch_input", batch=batch_number, total_batches=total_batches,
+                         aliases={key: item.chunk_id for key, item in batch_by_id.items()}, input=payload)
             with progress(f"观点抽取 {batch_number}/{total_batches} 批（{len(batch)} 个片段）"):
-                raw_result = await self._chain.ainvoke(
-                    {
-                        "question": question,
-                        "movie_context": movie_context or "未提供电影背景",
-                        "aspect": aspect or "未指定，按用户问题判断",
-                        "subaspects": json.dumps(list(subaspects), ensure_ascii=False),
-                        "known_targets": json.dumps(list(dict.fromkeys([
-                            *known_targets, *(opinion.target for item in judgements.values()
-                                              for opinion in item.opinions if opinion.relevance >= 2),
-                        ])), ensure_ascii=False),
-                        "candidates": json.dumps(
-                            [
-                                {
-                                    "chunk_id": local_id,
-                                    "platform": item.platform,
-                                    "chunk_text": item.chunk_text,
-                                }
-                                for local_id, item in batch_by_id.items()
-                            ],
-                            ensure_ascii=False,
-                        ),
-                    }
-                )
+                raw_result = await self._chain.ainvoke(payload)
+            record_event("rag.rerank_batch_output", batch=batch_number, output=raw_result)
             result = RerankResponse.model_validate(_model_data(raw_result))
             returned_ids = [item.chunk_id for item in result.items]
             if len(returned_ids) != len(batch) or set(returned_ids) != set(batch_by_id):
+                record_event("rag.rerank_batch_rejected", batch=batch_number, reason="candidate_id_mismatch",
+                             expected_ids=list(batch_by_id), returned_ids=returned_ids)
                 raise ValueError("Reranker must return each candidate ID exactly once")
             for judgement in result.items:
                 chunk_id = batch_by_id[judgement.chunk_id].chunk_id
@@ -162,21 +160,35 @@ def _to_ranked(
     subaspects: Sequence[str],
 ) -> list[RankedEvidence]:
     result = []
+    rejected, removed_reasons = [], []
     for index, opinion in enumerate(judgement.opinions, 1):
         span = opinion.evidence_span
-        if (
-            opinion.relevance < 2
-            or span not in candidate.chunk_text or span not in candidate.full_text
-            or (subaspects and opinion.subaspect not in subaspects)
-        ):
+        reasons = []
+        if opinion.relevance < 2:
+            reasons.append("indirect_or_irrelevant")
+        if span not in candidate.chunk_text or span not in candidate.full_text:
+            reasons.append("non_verbatim_evidence_span")
+        if subaspects and opinion.subaspect not in subaspects:
+            reasons.append("unplanned_subaspect")
+        if reasons:
+            rejected.append({"opinion_index": index, "opinion": opinion, "reasons": reasons})
             continue
         reason = opinion.reason if opinion.reason and opinion.reason in span else None
+        if opinion.reason and reason is None:
+            removed_reasons.append({"opinion_index": index, "reason": "reason_not_in_evidence_span",
+                                    "original_reason": opinion.reason})
         result.append(RankedEvidence(
             **candidate.model_dump(),
             **opinion.model_dump(exclude={"reason"}),
             reason=reason,
             evidence_id=f"evidence:{candidate.chunk_id}:opinion-{index}",
         ))
+    record_event(
+        "rag.opinion_extraction", chunk_id=candidate.chunk_id, review_id=candidate.review_id,
+        model_opinion_count=len(judgement.opinions),
+        accepted=[item.model_dump(exclude={"full_text", "chunk_text"}) for item in result],
+        rejected=rejected, removed_reasons=removed_reasons,
+    )
     return result
 
 

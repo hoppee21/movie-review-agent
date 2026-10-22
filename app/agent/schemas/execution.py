@@ -16,6 +16,7 @@ class ExecutionMode(StrEnum):
 
 class ActionStatus(StrEnum):
     COMPLETED = "completed"
+    UNSUPPORTED = "unsupported"
     NEEDS_CLARIFICATION = "needs_clarification"
     NOT_IMPLEMENTED = "not_implemented"
     CANCELLED = "cancelled"

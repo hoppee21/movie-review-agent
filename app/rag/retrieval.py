@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from typing import Any, Protocol, Sequence
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 
 from app.progress import progress
+from app.run_log import record_event
 from app.rag.embedding import EmbeddingProvider
 from app.rag.evidence import coverage_report, describe_gap, select_evidence
 from app.rag.movie_context import MOVIE_CONTEXT_GUIDANCE
@@ -221,8 +223,11 @@ class OpinionRetriever:
             aspect=aspect,
             platforms=selected_platforms,
         )
+        record_event("rag.query_plan", index_id=index_id, question=question,
+                     movie_context=movie_context, raw_plan=raw_plan, plan=query_plan)
         fusion = await self._hybrid_fusion(index, query_plan.queries)
         candidates = self._candidates(index, fusion, selected_platforms)
+        _log_candidates(index_id, 1, candidates)
         pool = await self.reranker.rerank(
             question=question,
             aspect=aspect,
@@ -242,10 +247,18 @@ class OpinionRetriever:
             subaspects=query_plan.subaspects,
             minimum=self.config.min_relevant_per_platform,
         )
+        record_event("rag.retrieval_round", round=1, pool_count=len(pool),
+                     selected=evidence, coverage=coverage)
         rounds = 1
 
         available_platforms = {chunk.platform for chunk in index.chunks if chunk.chunk_id not in seen_chunks}
         gaps = [gap for gap in coverage.gaps if gap.platform in available_platforms]
+        record_event(
+            "rag.followup_decision", proceed=bool(gaps and self.config.max_retrieval_rounds > 1),
+            reason=("coverage_sufficient" if not coverage.gaps else "corpus_exhausted" if not gaps
+                    else "round_limit" if self.config.max_retrieval_rounds <= 1 else "coverage_gaps"),
+            gaps=gaps, unavailable_gaps=[gap for gap in coverage.gaps if gap.platform not in available_platforms],
+        )
         if gaps and self.config.max_retrieval_rounds > 1:
             hyde_plan = await self.hyde_generator.generate(
                 question=question,
@@ -254,10 +267,13 @@ class OpinionRetriever:
                 evidence=evidence,
                 movie_context=movie_context,
             )
+            record_event("rag.hyde_output", output=hyde_plan)
             passages = self._sanitize_hyde(hyde_plan.passages, gaps)
+            record_event("rag.followup_queries", passages=passages)
             if passages:
                 fallback = await self._hyde_fusion(index, passages, gaps, seen_chunks)
                 candidates = self._candidates(index, fallback, selected_platforms)
+                _log_candidates(index_id, 2, candidates)
                 if candidates:
                     pool.extend(await self.reranker.rerank(
                         question=question, aspect=aspect, candidates=candidates,
@@ -276,6 +292,8 @@ class OpinionRetriever:
                     subaspects=query_plan.subaspects,
                     minimum=self.config.min_relevant_per_platform,
                 )
+                record_event("rag.retrieval_round", round=2, pool_count=len(pool),
+                             selected=evidence, coverage=coverage)
                 rounds = 2
 
         result = RetrievalResult(
@@ -290,6 +308,7 @@ class OpinionRetriever:
             rounds=rounds,
         )
         self.store.put_retrieval(result)
+        record_event("rag.retrieval_completed", result=result)
         return RetrievalArtifact(
             retrieval_id=result.retrieval_id,
             index_id=index_id,
@@ -451,6 +470,15 @@ class OpinionRetriever:
             math.ceil(platform_count * self.config.first_stage_ratio),
         )
         return min(platform_count, self.config.first_stage_max_k, requested)
+
+
+def _log_candidates(index_id: str, round_number: int, candidates: Sequence[RetrievalCandidate]) -> None:
+    record_event(
+        "rag.retrieval_candidates", index_id=index_id, round=round_number,
+        counts=dict(Counter(item.platform for item in candidates)),
+        candidates=[item.model_dump(include={"chunk_id", "review_id", "platform", "fusion_score"})
+                    for item in candidates],
+    )
 
 
 def _dense_search(

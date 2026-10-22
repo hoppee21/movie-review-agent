@@ -79,6 +79,7 @@ class ClarificationReply(BaseModel):
 class ClarificationRecord(BaseModel):
     issue_id: str
     question: str
+    options: list[dict[str, Any]] = Field(default_factory=list)
     option_id: str | None = None
     selected_label: str | None = None
     text: str | None = None

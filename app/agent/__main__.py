@@ -7,6 +7,7 @@ import logging
 
 from app.agent.Agent import MovieAgent
 from app.rag.runtime import build_openai_chat_model, build_openai_rag_runtime
+from app.run_log import record_run
 from config import API_MAX_RETRIES, API_TIMEOUT_SECONDS, load_openai_api_key
 
 
@@ -32,26 +33,32 @@ async def main() -> None:
         "开始处理问题；模型 %s，单次 API 超时 %.0f 秒，最多重试 %d 次",
         args.model, API_TIMEOUT_SECONDS, API_MAX_RETRIES,
     )
-    api_key = load_openai_api_key()
-    llm = build_openai_chat_model(args.model, api_key=api_key, reasoning_effort=args.reasoning_effort)
-    agent = MovieAgent(
-        llm,
-        rag_runtime=build_openai_rag_runtime(llm, api_key=api_key),
-    )
-    state = await agent.run(args.query, thread_id="cli")
+    with record_run(entrypoint="cli", query=args.query, model=args.model, reasoning_effort=args.reasoning_effort) as recorder:
+        print(f"运行记录：{recorder.directory}", flush=True)
+        api_key = load_openai_api_key()
+        llm = build_openai_chat_model(args.model, api_key=api_key, reasoning_effort=args.reasoning_effort)
+        agent = MovieAgent(
+            llm,
+            rag_runtime=build_openai_rag_runtime(llm, api_key=api_key),
+        )
+        state = await agent.run(args.query, thread_id="cli")
 
-    while pending := state.get("__interrupt__"):
-        print(json.dumps(pending[0].value, ensure_ascii=False, indent=2))
-        reply = input("补充信息：")
-        while not reply.strip():
-            reply = input("请输入补充信息：")
-        state = await agent.resume(reply, thread_id="cli")
+        while pending := state.get("__interrupt__"):
+            clarification = pending[0].value
+            recorder.event("clarification.requested", clarification=clarification)
+            print(json.dumps(clarification, ensure_ascii=False, indent=2))
+            reply = input("补充信息：")
+            while not reply.strip():
+                reply = input("请输入补充信息：")
+            recorder.event("clarification.replied", issue_id=clarification.get("issue_id"), reply=reply)
+            state = await agent.resume(reply, thread_id="cli")
 
-    print(json.dumps(
-        state["final_result"].model_dump(mode="json"),
-        ensure_ascii=False,
-        indent=2,
-    ))
+        recorder.write_result(state["final_result"])
+        print(json.dumps(
+            state["final_result"].model_dump(mode="json"),
+            ensure_ascii=False,
+            indent=2,
+        ))
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from app.agent.schemas import (
 )
 from app.tools.registry import ActionRegistry
 from app.progress import progress
+from app.run_log import record_event
 
 
 class Executor:
@@ -23,14 +24,19 @@ class Executor:
         state: AgentState,
     ) -> ActionResult:
         invocation = ActionInvocation.model_validate(invocation)
+        record_event("action.started", invocation=invocation)
         registration = self.registry.get(invocation.step.action, invocation.mode)
         if registration is None:
-            return ActionResult(
+            result = ActionResult(
                 status=ActionStatus.NOT_IMPLEMENTED,
                 output={"action": invocation.step.action.value},
             )
-        with progress(f"阶段 {invocation.step.action.value}"):
-            return await registration.handler(invocation, state)
+        else:
+            with progress(f"阶段 {invocation.step.action.value}"):
+                result = await registration.handler(invocation, state)
+        record_event("action.completed", action=invocation.step.action, status=result.status,
+                     output=result.output, issue=result.issue)
+        return result
 
 
 __all__ = ["Executor", "build_default_registry"]

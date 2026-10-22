@@ -37,12 +37,12 @@ from app.agent.schemas import (
     ClarificationReply,
     ExecutionMode,
     ExecutionPlan,
-    MovieAnalysis,
     PlanIntent,
     RequestAnalysis,
     TaskType,
 )
 from app.tools.registry import ActionRegistry
+from app.run_log import record_event
 
 if TYPE_CHECKING:
     from app.rag.runtime import RagRuntime
@@ -187,25 +187,32 @@ class MovieAgent:
         )
 
     async def _analyze_movie(self, state: AgentState) -> AgentState:
-        result = await self.movie_analyzer.analyze(
+        record_event("agent.movie_analysis.started")
+        analysis = await self.movie_analyzer.analyze(
             state["user_query"],
             clarification_messages(state.get("clarification_history", [])),
+            movie_context(state["movie_targets"]) if state.get("movie_targets") else "",
         )
-        return movie_updates(state, MovieAnalysis.model_validate(result))
+        record_event("agent.movie_analysis.completed", analysis=analysis)
+        return movie_updates(state, analysis)
 
     async def _analyze_request(self, state: AgentState) -> AgentState:
+        record_event("agent.request_analysis.started")
         result = await self.request_analyzer.analyze(
             state["user_query"],
             movie_context(state.get("movie_targets", [])),
             clarification_messages(state.get("clarification_history", [])),
         )
-        return {"request_analysis": RequestAnalysis.model_validate(result)}
+        analysis = RequestAnalysis.model_validate(result)
+        record_event("agent.request_analysis.completed", analysis=analysis)
+        return {"request_analysis": analysis}
 
     async def _build_plan(self, state: AgentState) -> AgentState:
         request = state.get("request_analysis")
         if request is None:
             raise RuntimeError("Cannot plan before request analysis")
         request = RequestAnalysis.model_validate(request)
+        record_event("agent.plan.started", question=request.question)
         result = await self.plan_builder.analyze(
             request.question,
             movie_context(state.get("movie_targets", [])),
@@ -213,13 +220,9 @@ class MovieAgent:
         intent = PlanIntent.model_validate(result)
         if not intent.platforms and intent.task != TaskType.UNSUPPORTED:
             intent = intent.model_copy(update={"platforms": ["imdb", "douban"]})
-        return {
-            "execution_plan": compile_plan(
-                intent,
-                state.get("movie_targets", []),
-            ),
-            "plan_cursor": 0,
-        }
+        plan = compile_plan(intent, state.get("movie_targets", []))
+        record_event("agent.plan.completed", plan=plan)
+        return {"execution_plan": plan, "plan_cursor": 0}
 
     def _controller(
         self,
@@ -263,7 +266,9 @@ class MovieAgent:
 
     @staticmethod
     def _finalize(state: AgentState) -> AgentState:
-        return finalize_state(state)
+        updates = finalize_state(state)
+        record_event("agent.finalized", result=updates.get("final_result", state.get("final_result")))
+        return updates
 
     @staticmethod
     def _parse_reply(

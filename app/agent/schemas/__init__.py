@@ -16,7 +16,7 @@ from app.agent.schemas.execution import (
 )
 from app.agent.schemas.movie import (
     MovieAnalysis,
-    MovieCandidate,
+    MovieConstraint,
     MovieMention,
     MovieTarget,
     MovieTargetStatus,
@@ -41,7 +41,7 @@ CHECKPOINT_MODEL_TYPES = (
     RunStatus,
     TaskType,
     RequestAnalysis,
-    MovieCandidate,
+    MovieConstraint,
     MovieMention,
     MovieAnalysis,
     MovieTarget,
@@ -73,7 +73,7 @@ __all__ = [
     "ExecutionMode",
     "ExecutionPlan",
     "MovieAnalysis",
-    "MovieCandidate",
+    "MovieConstraint",
     "MovieMention",
     "MovieTarget",
     "MovieTargetStatus",

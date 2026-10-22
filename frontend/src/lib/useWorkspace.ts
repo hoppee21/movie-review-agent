@@ -56,7 +56,7 @@ export function useWorkspace() {
       if (!streamConnected.current) void api.get(activeId).then(value => { accept(value); setOnline(true); }).catch(error => {
         if (error instanceof ApiError && error.status === 404) {
           close(); active.current = null; setActiveId(null); setSession(null); remember("movie-evidence:session", "");
-          setError("服务已重新启动。之前的运行会话已释放，请开始新的分析。");
+          setError("这个会话已不存在或已被删除，请开始新的分析。");
         } else setOnline(false);
       });
     }, 3000);

@@ -1,11 +1,12 @@
 """Adapters from registered Actions to existing Tool contracts and interrupts."""
 
 from collections.abc import Awaitable, Callable, Iterable
+import re
 from typing import Any
 
 from langgraph.types import interrupt
 
-from app.agent.movie_state import target_label
+from app.agent.movie_state import numbers_in_text, target_label
 from app.agent.schemas import (
     Action,
     ActionInvocation,
@@ -20,6 +21,8 @@ from app.agent.schemas import (
     MovieTarget,
     MovieTargetStatus,
     PatchAuthority,
+    RunResult,
+    RunStatus,
     StatePatch,
 )
 from app.tools.core.collect_movie_reviews import CollectMovieReviews
@@ -93,11 +96,10 @@ def _replace_target(
 def _resolved_target(target: MovieTarget, value: dict[str, Any]) -> MovieTarget:
     imdb_url = value.get("imdb_url")
     douban_url = value.get("douban_url")
-    if not isinstance(imdb_url, str) or not isinstance(douban_url, str):
-        raise RuntimeError("Resolved movie is missing platform URLs")
+    if not isinstance(value.get("wikidata_id"), str):
+        raise RuntimeError("Resolved movie is missing its verified Wikidata identity")
     return target.model_copy(
         update={
-            "query": str(value.get("title") or target.query),
             "english_title": str(value.get("title") or target.english_title or target.query),
             "release_year": value.get("release_year"),
             "status": MovieTargetStatus.RESOLVED,
@@ -116,21 +118,21 @@ def _tool_resolver_handler(tool: Tool) -> Callable[
         state: AgentState,
     ) -> ActionResult:
         target = _target(state, invocation.step.target_id)
-        if (
-            target.status == MovieTargetStatus.RESOLVED
-            and target.imdb_url
-            and target.douban_url
-        ):
+        if target.status == MovieTargetStatus.RESOLVED:
             return ActionResult(
                 status=ActionStatus.COMPLETED,
                 output={"target": target.model_dump()},
             )
 
         params: dict[str, Any] = {
-            "movie_query": target.english_title or target.query,
+            "movie_query": target.wikidata_id or target.query,
         }
         if target.release_year is not None:
             params["release_year"] = target.release_year
+        if target.installment is not None:
+            params["installment"] = target.installment
+        if target.search_hints:
+            params["search_hints"] = target.search_hints
         result = await tool.execute(params)
         status = result.get("status")
 
@@ -159,7 +161,7 @@ def _tool_resolver_handler(tool: Tool) -> Callable[
                 issue=ClarificationIssue(
                     issue_id=f"{invocation.step.step_id}:movie",
                     kind="movie_identity",
-                    question="Wikidata 找到多个可能的电影，请选择正确的一部。",
+                    question=result.get("question") or "请确认你指的具体电影及版本。",
                     target_id=target.target_id,
                     options=options,
                     suggested_actions=[Action.ASK_USER],
@@ -174,13 +176,15 @@ def _tool_resolver_handler(tool: Tool) -> Callable[
                     issue_id=f"{invocation.step.step_id}:not-found",
                     kind="movie_not_found",
                     question=(
-                        "没有找到对应电影，请补充英文片名、年份或平台 ID。"
+                        "没有找到匹配作品，请检查片名，或补充年份、演员等线索或平台 ID。"
                     ),
                     target_id=target.target_id,
                     suggested_actions=[Action.ASK_USER],
                 ),
                 output=result,
             )
+        if status == "unsupported":
+            return ActionResult(status=ActionStatus.UNSUPPORTED, output=result)
         raise RuntimeError(f"Unexpected resolve_movie status: {status!r}")
 
     return handle
@@ -192,6 +196,18 @@ def _resolver_option(
     candidate: dict[str, Any],
     index: int,
 ) -> ClarificationOption:
+    if candidate.get("entity_type") == "series":
+        return ClarificationOption(
+            option_id=f"candidate-{index}", label=f"{candidate['title']}（整个系列）",
+            details={"wikidata_id": candidate["wikidata_id"], "entity_type": "series"},
+            internal_patch=StatePatch(
+                set_values={"final_result": RunResult(
+                    status=RunStatus.UNSUPPORTED,
+                    reason="当前仅支持单部电影，暂不支持整个系列的联合处理。",
+                    data={"requested_series": candidate},
+                )}, authority=PatchAuthority.USER_CONFIRMED,
+            ),
+        )
     resolved = _resolved_target(target, candidate)
     return ClarificationOption(
         option_id=f"candidate-{index}",
@@ -199,6 +215,10 @@ def _resolver_option(
         details={
             "release_year": resolved.release_year,
             "wikidata_id": resolved.wikidata_id,
+            "entity_type": "movie",
+            "installments": candidate.get("installments", []),
+            "imdb_url": resolved.imdb_url,
+            "douban_url": resolved.douban_url,
         },
         internal_patch=StatePatch(
             set_values={"movie_targets": _replace_target(state, resolved)},
@@ -217,7 +237,11 @@ def _tool_collector_handler(tool: Tool) -> Callable[
     ) -> ActionResult:
         target = _target(state, invocation.step.target_id)
         if not target.imdb_url or not target.douban_url:
-            raise RuntimeError("collect_movie_reviews requires resolved platform URLs")
+            return ActionResult(
+                status=ActionStatus.UNSUPPORTED,
+                output={"reason": "已核实电影身份，但缺少 IMDb 或豆瓣链接，当前无法采集双平台评论。",
+                        "movie": target.model_dump(mode="json")},
+            )
         result = await tool.execute(
             {"imdb_url": target.imdb_url, "douban_url": target.douban_url}
         )
@@ -274,7 +298,8 @@ def _ask_user_handler(max_rounds: int) -> Callable[
         record = ClarificationRecord(
             issue_id=issue.issue_id,
             question=issue.question,
-            option_id=reply.option_id,
+            options=[item.public_payload() for item in issue.options],
+            option_id=option.option_id if option else None,
             selected_label=option.label if option else None,
             text=reply.text,
         )
@@ -309,16 +334,37 @@ def _selected_option(
     issue: ClarificationIssue,
     reply: ClarificationReply,
 ) -> ClarificationOption | None:
-    if reply.option_id is None:
-        return None
-    option = next(
-        (
-            candidate
-            for candidate in issue.options
-            if candidate.option_id == reply.option_id
-        ),
-        None,
+    if reply.option_id is not None:
+        option = next(
+            (item for item in issue.options if item.option_id == reply.option_id),
+            None,
+        )
+        if option is None:
+            raise ValueError("reply option_id is not in pending clarification")
+        return option
+
+    # Interpret only a complete, explicit choice against the shown list.
+    text = (reply.text or "").strip()
+    match = re.fullmatch(
+        r"(?:我选|选择|选)?第?([一二两三四五六七八九十\d]+)(个|项|部|号|版)?[。.!！]?",
+        text,
     )
-    if option is None:
-        raise ValueError("reply option_id is not in pending clarification")
-    return option
+    if not issue.options or not match:
+        return None
+    numbers = numbers_in_text(text)
+    if len(numbers) != 1:
+        return None
+    number = numbers.pop()
+    if match.group(2) == "部":
+        matches = [
+            item for item in issue.options
+            if number in item.details.get("installments", [])
+        ]
+    elif 1 <= number <= len(issue.options):
+        return issue.options[number - 1]
+    else:
+        matches = [
+            item for item in issue.options
+            if item.details.get("release_year") == number
+        ]
+    return matches[0] if len(matches) == 1 else None

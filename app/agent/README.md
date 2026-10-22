@@ -16,7 +16,7 @@ resolve_next / plan step
 
 ## 设计边界
 
-- MovieAnalyzer 只提取电影 mentions 和候选，不理解任务。
+- MovieAnalyzer 区分非电影、电影泛请求和具体作品请求，提取实际目标、参照作品及有原文依据的用户限定；名称提示只供检索。
 - RequestAnalyzer 使用已选电影和澄清记录重述需求。
 - PlanBuilder 只输出 PlanIntent；确定性编译器负责生成白名单 Action。
 - Clarification 是 resolution 模式下的 Action，与普通执行共用 Registry 和 Executor。
@@ -58,6 +58,18 @@ resume() 也兼容纯文本；运行时会将文本绑定到当前 issue_id。�
 
 analyze() 暂时是 run() 的兼容别名。默认最多允许三轮澄清，可通过 MovieAgent(..., max_clarification_rounds=N) 调整。
 
+CLI 和 Web 入口会自动记录每次运行，默认保存到 `output/runs/<run_id>/events.jsonl` 和 `result.json`，可通过 `AGENT_DATA_DIR` 更改数据根目录。重试追加事件，最终结果原子替换。详细目录与恢复边界见 [Web 工作台说明](../../frontend/README.md#运行记录)。直接作为库调用时，可用同一上下文覆盖 `run` 和后续 `resume`：
+
+~~~python
+from app.run_log import record_run
+
+with record_run(query=user_query, entrypoint="library") as recording:
+    state = await agent.run(user_query, thread_id="conversation-1")
+    # 如有澄清，继续在此上下文内调用 resume；完成后保存业务结果。
+    if state.get("final_result") is not None:
+        recording.write_result(state["final_result"])
+~~~
+
 ## 计划与执行
 
 Planner 的固定映射：
@@ -69,7 +81,19 @@ Planner 的固定映射：
 | opinion_qa | resolve → collect → build → query → aggregate |
 | platform_comparison | resolve → collect → build → query → aggregate |
 
-Executor 根据 target_id 从 State 绑定工具参数。Wikidata 返回唯一结果时更新目标与平台 URL；返回多个结果时进入同一 structured clarification 流程；采集结果只在 State 中保存文件路径和数量。
+识别后先在 resolution 模式查证电影，再进入需求理解和计划生成。Executor 根据 target_id 绑定工具参数；计划中的 resolve_movie 会复用已核实目标。
+
+电影识别遵循以下黑盒合同：
+
+- 非电影和未指向具体作品的电影泛请求返回 unsupported；想问某部作品但缺少线索时追问。
+- 实际目标与参照作品分开，保留全部目标；明确多目标或整个系列时告知仅支持单部。
+- 年份和部数必须带用户原文 quote，经代码校验后才成为过滤条件；模型记忆只能作为名称检索提示。
+- Wikidata 支持中英文检索，读取系列成员、版本和序号，平台 ID 可缺失。搜索限额作用在实体层，避免多个上映日期挤掉其他电影。
+- 仅裸片名即使只查到一项也先确认；明确 ID 或有外部数据支持的年份/部数可核实后继续。系列与首部同名时不自动选首部。
+- 候选来自外部查询。澄清记录保留完整公开选项，支持“第二个”等明确选择；内部 patch 不进入历史消息。
+- 查不到匹配作品时补充线索；服务故障抛出可重试异常。核实身份但缺少平台链接时，不伪装成作品不存在，采集阶段说明能力限制。
+
+采集结果只在 State 中保存文件路径和数量。
 
 未传入 RagRuntime 时，执行到观点 Action 仍会明确返回 not_implemented，便于离线测试或只启用采集能力。未预期的模型或工具异常不会伪装成业务状态。使用同一 thread_id 和原问题再次调用 run()，会从 checkpoint 的失败节点重试。
 

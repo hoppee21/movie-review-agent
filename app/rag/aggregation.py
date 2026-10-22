@@ -10,6 +10,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.progress import progress
+from app.run_log import record_event
 from app.rag.evidence import coverage_report, opinion_scope
 from app.rag.movie_context import MOVIE_CONTEXT_GUIDANCE
 from app.rag.models import (
@@ -130,22 +131,30 @@ class LLMOpinionAggregator:
         accepted = []
         if sources:
             context = _evidence_context(retrieval, sources)
+            record_event("rag.aggregation_input", retrieval_id=retrieval.retrieval_id,
+                         aliases={key: item.evidence_id for key, item in sources.items()}, input=context)
             with progress(f"汇总 {len(sources)} 条观点，生成分析"):
-                draft = AggregationDraft.model_validate(await self._draft_chain.ainvoke({
+                raw_draft = await self._draft_chain.ainvoke({
                     "payload": json.dumps(context, ensure_ascii=False),
-                }))
+                })
+            record_event("rag.aggregation_draft", output=raw_draft)
+            draft = AggregationDraft.model_validate(raw_draft)
             if draft.claims:
                 claims = {f"c{i}": claim for i, claim in enumerate(draft.claims, 1)}
+                audit_input = {
+                    **_evidence_context(retrieval, sources, include_context=True),
+                    "claims": [{
+                        "claim_id": key, **claim.model_dump(),
+                        "constraint_error": _claim_error(claim, sources, retrieval.platforms),
+                    } for key, claim in claims.items()],
+                }
+                record_event("rag.audit_input", input=audit_input)
                 with progress(f"复核 {len(claims)} 条分析判断及引用"):
-                    audit = ClaimAudit.model_validate(await self._review_chain.ainvoke({
-                        "payload": json.dumps({
-                            **_evidence_context(retrieval, sources, include_context=True),
-                            "claims": [{
-                                "claim_id": key, **claim.model_dump(),
-                                "constraint_error": _claim_error(claim, sources, retrieval.platforms),
-                            } for key, claim in claims.items()],
-                        }, ensure_ascii=False),
-                    }))
+                    raw_audit = await self._review_chain.ainvoke({
+                        "payload": json.dumps(audit_input, ensure_ascii=False),
+                    })
+                record_event("rag.audit_output", output=raw_audit)
+                audit = ClaimAudit.model_validate(raw_audit)
                 accepted, sources = _apply_audit(claims, audit, sources, retrieval.platforms)
         # Semantic rejection can invalidate the earlier retrieval coverage.
         coverage = coverage_report(
@@ -153,7 +162,9 @@ class LLMOpinionAggregator:
             subaspects=retrieval.query_plan.subaspects,
             minimum=retrieval.coverage.minimum_reviews,
         )
-        return _assemble_answer(accepted, sources, coverage)
+        answer = _assemble_answer(accepted, sources, coverage)
+        record_event("rag.answer", retrieval_id=retrieval.retrieval_id, accepted_claims=accepted, answer=answer)
+        return answer
 
 
 def _evidence_context(retrieval, sources, *, include_context=False):
@@ -211,10 +222,14 @@ def _claim_error(claim: AnswerClaim, sources, platforms) -> str | None:
 def _apply_audit(claims, audit, sources, platforms):
     ids = [item.claim_id for item in audit.reviews]
     if len(ids) != len(claims) or set(ids) != set(claims):
+        record_event("rag.audit_rejected", reason="claim_id_mismatch",
+                     expected_ids=list(claims), returned_ids=ids)
         raise ValueError("Audit must review each claim ID exactly once")
     invalid = set(audit.invalid_evidence_ids)
     unexplained = set(audit.unsupported_reason_ids)
     if (invalid | unexplained) - sources.keys():
+        record_event("rag.audit_rejected", reason="unknown_evidence_ids",
+                     unknown_ids=sorted((invalid | unexplained) - sources.keys()))
         raise ValueError("Audit contains unknown evidence IDs")
     sources = {
         key: item.model_copy(update={"reason": None}) if key in unexplained else item
@@ -225,19 +240,27 @@ def _apply_audit(claims, audit, sources, platforms):
     for key, original in claims.items():
         decision = decisions[key]
         if (decision.verdict == "revise") != (decision.replacement is not None):
+            record_event("rag.audit_rejected", reason="invalid_replacement", claim_id=key)
             raise ValueError("Only revise decisions require a replacement claim")
         if decision.verdict == "drop":
+            record_event("rag.claim_resolution", claim_id=key, accepted=False, reason="model_drop",
+                         model_verdict=decision.verdict, model_reason=decision.reason)
             continue
         claim = decision.replacement if decision.verdict == "revise" else original
         original_refs = set(original.evidence_ids + original.counterevidence_ids)
-        if (
-            set(claim.evidence_ids + claim.counterevidence_ids) - original_refs
-            or (claim.kind != original.kind and claim.kind != "finding")
-            or _claim_error(claim, sources, platforms)
-        ):
+        rejection_reason = (
+            "revision_added_evidence" if set(claim.evidence_ids + claim.counterevidence_ids) - original_refs
+            else "revision_changed_claim_kind" if claim.kind != original.kind and claim.kind != "finding"
+            else _claim_error(claim, sources, platforms)
+        )
+        if rejection_reason:
             # Reject the whole claim; never keep a statement after stripping a bad citation.
+            record_event("rag.claim_resolution", claim_id=key, accepted=False, reason=rejection_reason,
+                         model_verdict=decision.verdict, model_reason=decision.reason)
             continue
         accepted.append(claim)
+        record_event("rag.claim_resolution", claim_id=key, accepted=True, claim=claim,
+                     model_verdict=decision.verdict, model_reason=decision.reason)
     return accepted, sources
 
 

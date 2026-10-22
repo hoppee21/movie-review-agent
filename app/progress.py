@@ -6,6 +6,8 @@ from contextvars import ContextVar
 from time import monotonic
 from typing import Any, Callable
 
+from app.run_log import record_event
+
 
 logger = logging.getLogger(__name__)
 _observer: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar("progress_observer", default=None)
@@ -22,10 +24,12 @@ def observe_progress(callback: Callable[[dict[str, Any]], None]):
 
 
 def _emit(label: str, phase: str, started: float):
+    event = {"label": label, "phase": phase, "elapsed_seconds": monotonic() - started}
+    record_event(f"stage.{phase}", **event)
     observer = _observer.get()
     if observer:
         try:
-            observer({"label": label, "phase": phase, "elapsed_seconds": monotonic() - started})
+            observer(event)
         except Exception:
             logger.exception("Progress observer failed")
 

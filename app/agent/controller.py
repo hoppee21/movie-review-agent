@@ -206,6 +206,12 @@ def apply_action_result(state: AgentState) -> dict[str, Any]:
 
     plan = state.get("execution_plan")
     task = ExecutionPlan.model_validate(plan).intent.task if plan else None
+    if result.status == ActionStatus.UNSUPPORTED:
+        updates["final_result"] = RunResult(
+            status=RunStatus.UNSUPPORTED, task=task,
+            reason=str(result.output.get("reason") or "暂不支持此请求。"), data=result.output,
+        )
+        return updates
     if result.status == ActionStatus.NOT_IMPLEMENTED:
         updates["final_result"] = RunResult(
             status=RunStatus.NOT_IMPLEMENTED,

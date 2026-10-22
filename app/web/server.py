@@ -20,8 +20,10 @@ ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_PATH = ROOT / "reports" / "matrix_claim_audit_replay_current.json"
 
 
-def create_app(*, driver_factory=MovieAgentDriver, default_model: str | None = None) -> FastAPI:
-    service = SessionService(driver_factory, default_model=default_model or os.getenv("AGENT_MODEL", "gpt-5.4-mini"))
+def create_app(*, driver_factory=MovieAgentDriver, default_model: str | None = None,
+               data_dir: Path | None = None) -> FastAPI:
+    service = SessionService(driver_factory, default_model=default_model or os.getenv("AGENT_MODEL", "gpt-5.4-mini"),
+                             data_dir=data_dir)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -42,7 +44,7 @@ def create_app(*, driver_factory=MovieAgentDriver, default_model: str | None = N
         return {"protocol_version": PROTOCOL_VERSION, "name": "Movie Evidence Agent", "default_model": service.default_model,
                 "features": ["progress", "clarification", "reports", "evidence", "cancellation", "retry"],
                 "example_available": EXAMPLE_PATH.exists(), "max_query_chars": 12000,
-                "storage": "process_memory"}
+                "storage": "sqlite"}
 
     @app.get("/api/v1/sessions")
     async def sessions():
@@ -113,6 +115,3 @@ def create_app(*, driver_factory=MovieAgentDriver, default_model: str | None = N
     if dist.exists():
         app.mount("/", StaticFiles(directory=dist, html=True), name="frontend")
     return app
-
-
-app = create_app()

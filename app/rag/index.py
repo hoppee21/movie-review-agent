@@ -8,7 +8,7 @@ import logging
 import math
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 from uuid import uuid4
@@ -16,6 +16,7 @@ from uuid import uuid4
 import numpy as np
 
 from app.rag.embedding import EmbeddingProvider
+from app.run_log import record_event
 from app.rag.models import (
     IndexArtifact,
     RetrievalResult,
@@ -220,12 +221,16 @@ class OpinionIndexBuilder:
         fingerprint = self._fingerprint(paths.values())
         cached = self.store.find_index(fingerprint)
         if cached is not None:
+            record_event("rag.index_reused", fingerprint=fingerprint, artifact=self._artifact(cached))
             return self._artifact(cached)
 
         documents: dict[str, ReviewDocument] = {}
         seen_text: set[tuple[str, str]] = set()
+        input_counts = {}
         for platform, path in paths.items():
-            for position, raw in enumerate(_load_records(path)):
+            records = _load_records(path)
+            input_counts[platform] = len(records)
+            for position, raw in enumerate(records):
                 document = _normalize_document(raw, platform, position)
                 text_key = (
                     document.platform,
@@ -266,6 +271,13 @@ class OpinionIndexBuilder:
                 )
 
         logger.info("已整理 %d 条独立评论，切分为 %d 个片段", len(documents), len(chunks))
+        record_event(
+            "rag.index_input", paths={platform: str(path) for platform, path in paths.items()},
+            fingerprint=fingerprint, input_counts=input_counts,
+            document_counts=dict(Counter(item.platform for item in documents.values())),
+            chunk_counts=dict(Counter(item.platform for item in chunks)),
+            embedding_model=self.embedder.name, config=asdict(self.config),
+        )
         vectors = await self.embedder.embed_documents(
             [chunk.embed_text for chunk in chunks]
         )
@@ -280,6 +292,8 @@ class OpinionIndexBuilder:
             embedding_model=self.embedder.name,
         )
         self.store.put_index(index)
+        record_event("rag.index_built", fingerprint=fingerprint, artifact=self._artifact(index),
+                     vector_shape=list(matrix.shape))
         return self._artifact(index)
 
     def _fingerprint(self, paths: Iterable[Path]) -> str:
