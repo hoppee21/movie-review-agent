@@ -29,7 +29,9 @@ def movie_updates(state: AgentState, analysis: MovieAnalysis) -> AgentState:
     mentions = [item for item in analysis.mentions if item.role == "target"]
     targets: list[MovieTarget] = []
     for item in mentions:
-        if re.fullmatch(r"[这那该此](?:一)?(?:部|个)?(?:电影|影片|片子|片)?", item.query.strip()):
+        if re.fullmatch(
+            r"[这那该此](?:一)?(?:部|个)?(?:电影|影片|片子|片)?", item.query.strip()
+        ):
             targets.extend(
                 MovieTarget.model_validate(target)
                 for target in state.get("movie_targets", [])
@@ -55,7 +57,10 @@ def movie_updates(state: AgentState, analysis: MovieAnalysis) -> AgentState:
         updates["final_result"] = RunResult(
             status=RunStatus.UNSUPPORTED,
             reason=reason,
-            data={"kind": analysis.kind, "movie_queries": [item.query for item in mentions]},
+            data={
+                "kind": analysis.kind,
+                "movie_queries": [item.query for item in mentions],
+            },
         )
     elif not targets:
         updates["pending_issues"] = [
@@ -84,7 +89,9 @@ def _mention_target(mention: MovieMention, index: int, texts: list[str]) -> Movi
     pattern = re.escape(mention.query)
     if is_identifier(mention.query):
         pattern = rf"(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])"
-    query = mention.query if any(re.search(pattern, text) for text in texts) else texts[0]
+    query = (
+        mention.query if any(re.search(pattern, text) for text in texts) else texts[0]
+    )
     return MovieTarget(
         target_id=f"movie-{index}",
         query=query or mention.query,
@@ -117,7 +124,7 @@ def _explicit_number(
         pattern = rf"{pattern}(?![A-Za-z0-9_])"
     for text in texts:
         for match in re.finditer(pattern, text):
-            prefix = text[max(0, match.start() - 6):match.start()]
+            prefix = text[max(0, match.start() - 6) : match.start()]
             if not re.search(rf"(?:{negative})\s*$", prefix):
                 return clue.value
     return None
@@ -144,6 +151,17 @@ def numbers_in_text(text: str) -> set[int]:
         if value.upper() in roman
     )
     return result
+
+
+def get_movie_target(state: AgentState, target_id: str | None) -> MovieTarget:
+    """Read one target, including dictionaries restored from a checkpoint."""
+    if target_id is None:
+        raise RuntimeError("Action requires a target_id")
+    for raw_target in state.get("movie_targets", []):
+        target = MovieTarget.model_validate(raw_target)
+        if target.target_id == target_id:
+            return target
+    raise RuntimeError(f"Movie target not found: {target_id}")
 
 
 def movie_context(targets: list[MovieTarget]) -> str:

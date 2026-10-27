@@ -8,9 +8,10 @@ from typing import Any, Callable
 
 from app.run_log import record_event
 
-
 logger = logging.getLogger(__name__)
-_observer: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar("progress_observer", default=None)
+_observer: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar(
+    "progress_observer", default=None
+)
 
 
 @contextmanager
@@ -42,7 +43,12 @@ def progress(label: str):
     try:
         yield
     except Exception as exc:
-        logger.info("%s：中断（%s），耗时 %.1f 秒", label, type(exc).__name__, monotonic() - started)
+        logger.info(
+            "%s：中断（%s），耗时 %.1f 秒",
+            label,
+            type(exc).__name__,
+            monotonic() - started,
+        )
         _emit(label, "failed", started)
         raise
     else:

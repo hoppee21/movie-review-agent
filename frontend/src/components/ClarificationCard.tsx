@@ -1,8 +1,7 @@
 import { useRef, useState } from "react";
-import type { Clarification } from "../lib/protocol";
+import type { Clarification, ReplyBody } from "../lib/protocol";
 import { Icon } from "./Icon";
 
-type ReplyBody = { request_id: string; issue_id: string; option_id?: string; text?: string; cancelled?: boolean };
 export function ClarificationCard({ issue, active, onReply }: { issue: Clarification; active: boolean; onReply: (body: ReplyBody) => Promise<void> }) {
   const [choice, setChoice] = useState("");
   const [text, setText] = useState("");

@@ -1,8 +1,8 @@
 """Shared opinion selection and coverage rules, independent of retrieval algorithms."""
 
+import re
 from collections import Counter, defaultdict
 from collections.abc import Sequence
-import re
 
 from app.rag.models import (
     CoverageGap,
@@ -24,11 +24,22 @@ def unique_evidence(evidence: Sequence[RankedEvidence]) -> list[RankedEvidence]:
     seen_spans = defaultdict(list)
     quote_sources = {}
     result = []
-    for item in sorted(evidence, key=lambda x: (
-        -x.relevance, -x.evidence_quality, -x.fusion_score, x.evidence_id,
-    )):
+    for item in sorted(
+        evidence,
+        key=lambda x: (
+            -x.relevance,
+            -x.evidence_quality,
+            -x.fusion_score,
+            x.evidence_id,
+        ),
+    ):
         span = (item.evidence_span or "").strip()
-        if item.relevance < 2 or not span or span not in item.chunk_text or span not in item.full_text:
+        if (
+            item.relevance < 2
+            or not span
+            or span not in item.chunk_text
+            or span not in item.full_text
+        ):
             continue
         quote = " ".join(span.casefold().split())
         group = (item.platform, *opinion_scope(item), item.stance)
@@ -36,7 +47,10 @@ def unique_evidence(evidence: Sequence[RankedEvidence]) -> list[RankedEvidence]:
         if any(quote in previous or previous in quote for previous in seen_spans[key]):
             continue
         quote_key = (*group, quote)
-        if len(quote) >= 64 and quote_sources.get(quote_key, item.review_id) != item.review_id:
+        if (
+            len(quote) >= 64
+            and quote_sources.get(quote_key, item.review_id) != item.review_id
+        ):
             continue
         seen_spans[key].append(quote)
         quote_sources[quote_key] = item.review_id
@@ -54,27 +68,42 @@ def select_evidence(
     """Spend the final budget on dimensions, comparable targets and distinct opinions."""
 
     relevant = unique_evidence(evidence)
-    groups = [{opinion_scope(item) for item in relevant if item.platform == p} for p in platforms]
+    groups = [
+        {opinion_scope(item) for item in relevant if item.platform == p}
+        for p in platforms
+    ]
     common = set.intersection(*groups) if groups else set()
     result = []
     for platform in platforms:
         remaining = [item for item in relevant if item.platform == platform]
-        dimensions, targets, explained, stances, reviews = set(), set(), set(), set(), set()
+        dimensions, targets, explained, stances, reviews = (
+            set(),
+            set(),
+            set(),
+            set(),
+            set(),
+        )
         platform_stances = set()
         for _ in range(limit_per_platform):
             if not remaining:
                 break
-            item = max(remaining, key=lambda x: (
-                x.subaspect not in dimensions,
-                len(reviews) < minimum_reviews and x.review_id not in reviews,
-                x.stance != OpinionStance.UNCLEAR and x.stance not in platform_stances,
-                opinion_scope(x) in common and opinion_scope(x) not in targets,
-                opinion_scope(x) not in targets,
-                x.evidence_quality == 2 and opinion_scope(x) not in explained,
-                (*opinion_scope(x), x.stance) not in stances,
-                x.review_id not in reviews,
-                x.evidence_quality, x.relevance, x.fusion_score,
-            ))
+            item = max(
+                remaining,
+                key=lambda x: (
+                    x.subaspect not in dimensions,
+                    len(reviews) < minimum_reviews and x.review_id not in reviews,
+                    x.stance != OpinionStance.UNCLEAR
+                    and x.stance not in platform_stances,
+                    opinion_scope(x) in common and opinion_scope(x) not in targets,
+                    opinion_scope(x) not in targets,
+                    x.evidence_quality == 2 and opinion_scope(x) not in explained,
+                    (*opinion_scope(x), x.stance) not in stances,
+                    x.review_id not in reviews,
+                    x.evidence_quality,
+                    x.relevance,
+                    x.fusion_score,
+                ),
+            )
             result.append(item)
             remaining.remove(item)
             dimensions.add(item.subaspect)
@@ -96,7 +125,9 @@ def coverage_report(
 ) -> CoverageReport:
     """Check the actual writing evidence; emit the same gaps used by follow-up retrieval."""
 
-    relevant = [item for item in unique_evidence(evidence) if item.platform in platforms]
+    relevant = [
+        item for item in unique_evidence(evidence) if item.platform in platforms
+    ]
     review_stances = defaultdict(set)
     for item in relevant:
         review_stances[item.platform, item.review_id].add(item.stance)
@@ -104,7 +135,8 @@ def coverage_report(
     for (platform, _), stances in review_stances.items():
         explicit = stances - {OpinionStance.UNCLEAR}
         stance = (
-            OpinionStance.MIXED if len(explicit) > 1
+            OpinionStance.MIXED
+            if len(explicit) > 1
             else next(iter(explicit), OpinionStance.UNCLEAR)
         )
         counts[platform][stance.value] += 1
@@ -120,27 +152,47 @@ def coverage_report(
         observed = {item.subaspect for item in relevant if item.platform == platform}
         for subaspect in subaspects:
             if subaspect not in observed:
-                gaps.append(CoverageGap(platform=platform, kind="subaspect", subaspect=subaspect))
+                gaps.append(
+                    CoverageGap(
+                        platform=platform, kind="subaspect", subaspect=subaspect
+                    )
+                )
 
     for (platform, target, subaspect), items in groups.items():
         if not any(item.evidence_quality == 2 for item in items):
-            gaps.append(CoverageGap(
-                platform=platform, kind="reason", target=items[0].target, subaspect=subaspect,
-            ))
+            gaps.append(
+                CoverageGap(
+                    platform=platform,
+                    kind="reason",
+                    target=items[0].target,
+                    subaspect=subaspect,
+                )
+            )
         for other in platforms:
             if other != platform and (other, target, subaspect) not in groups:
-                gaps.append(CoverageGap(
-                    platform=other, kind="comparison", target=items[0].target, subaspect=subaspect,
-                ))
+                gaps.append(
+                    CoverageGap(
+                        platform=other,
+                        kind="comparison",
+                        target=items[0].target,
+                        subaspect=subaspect,
+                    )
+                )
 
-    missing = {p: [g.subaspect for g in gaps if g.platform == p and g.kind == "subaspect"]
-               for p in platforms}
-    missing_subaspects = [label for label in subaspects if any(label in v for v in missing.values())]
+    missing = {
+        p: [g.subaspect for g in gaps if g.platform == p and g.kind == "subaspect"]
+        for p in platforms
+    }
+    missing_subaspects = [
+        label for label in subaspects if any(label in v for v in missing.values())
+    ]
     return CoverageReport(
         minimum_reviews=minimum,
         sufficient=not gaps,
         relevant_by_platform=by_platform,
-        stance_counts={p: {s.value: counts[p][s.value] for s in OpinionStance} for p in platforms},
+        stance_counts={
+            p: {s.value: counts[p][s.value] for s in OpinionStance} for p in platforms
+        },
         covered_subaspects=[s for s in subaspects if s not in missing_subaspects],
         missing_subaspects=missing_subaspects,
         missing_platforms=[g.platform for g in gaps if g.kind == "reviews"],
@@ -157,5 +209,7 @@ def describe_gap(gap: CoverageGap) -> str:
         "reason": "仅有判断，缺少原文明示的理由或条件",
         "comparison": "缺少同一对象和方面的可比观点",
     }[gap.kind]
-    scope = " / ".join(value for value in (gap.platform, gap.target, gap.subaspect) if value)
+    scope = " / ".join(
+        value for value in (gap.platform, gap.target, gap.subaspect) if value
+    )
     return f"{scope}：{need}"

@@ -9,8 +9,8 @@ from app.agent.schemas import (
     AgentState,
     ClarificationIssue,
     ClarificationRecord,
-    ExecutionPlan,
     ExecutionMode,
+    ExecutionPlan,
     MovieAnalysis,
     MovieTarget,
     RequestAnalysis,
@@ -19,7 +19,6 @@ from app.agent.schemas import (
     StatePatch,
     TaskType,
 )
-
 
 ControllerNode = Literal[
     "analyze_movie",
@@ -134,7 +133,9 @@ def _normalize_list_field(field: str, values: list[Any]) -> list[Any]:
 
 
 def patch_invalidates_plan(patch: StatePatch | None) -> bool:
-    return bool(patch and set(patch.invalidates) & {"movie", "request", "plan", "execution"})
+    return bool(
+        patch and set(patch.invalidates) & {"movie", "request", "plan", "execution"}
+    )
 
 
 def next_node(state: AgentState) -> ControllerNode:
@@ -196,9 +197,7 @@ def apply_action_result(state: AgentState) -> dict[str, Any]:
         ]
         if invocation.mode == ExecutionMode.RESOLUTION:
             pending = [
-                issue
-                for issue in pending
-                if issue.issue_id != invocation.issue_id
+                issue for issue in pending if issue.issue_id != invocation.issue_id
             ]
         pending.append(result.issue)
         updates["pending_issues"] = pending
@@ -208,8 +207,10 @@ def apply_action_result(state: AgentState) -> dict[str, Any]:
     task = ExecutionPlan.model_validate(plan).intent.task if plan else None
     if result.status == ActionStatus.UNSUPPORTED:
         updates["final_result"] = RunResult(
-            status=RunStatus.UNSUPPORTED, task=task,
-            reason=str(result.output.get("reason") or "暂不支持此请求。"), data=result.output,
+            status=RunStatus.UNSUPPORTED,
+            task=task,
+            reason=str(result.output.get("reason") or "暂不支持此请求。"),
+            data=result.output,
         )
         return updates
     if result.status == ActionStatus.NOT_IMPLEMENTED:
@@ -251,8 +252,7 @@ def finalize_state(state: AgentState) -> AgentState:
             )
         }
     targets = [
-        MovieTarget.model_validate(target)
-        for target in state.get("movie_targets", [])
+        MovieTarget.model_validate(target) for target in state.get("movie_targets", [])
     ]
     data: dict[str, Any] = {
         "movie_targets": [target.model_dump(mode="json") for target in targets]

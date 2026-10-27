@@ -4,9 +4,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-
 PROTOCOL_VERSION = "1.0"
-RunStatus = Literal["queued", "running", "waiting_for_input", "completed", "failed", "cancelled"]
+RunStatus = Literal[
+    "queued", "running", "waiting_for_input", "completed", "failed", "cancelled"
+]
 
 
 class CreateSession(BaseModel):

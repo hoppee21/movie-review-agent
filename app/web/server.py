@@ -1,9 +1,9 @@
 """FastAPI host for the stable Agent UI protocol and optional built frontend."""
 
-from contextlib import asynccontextmanager
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, Request
@@ -12,28 +12,43 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.web.adapter import MovieAgentDriver, report_from_answer
-from app.web.contracts import CreateRun, CreateSession, PROTOCOL_VERSION, Reply
+from app.web.contracts import PROTOCOL_VERSION, CreateRun, CreateSession, Reply
 from app.web.sessions import SessionError, SessionService
-
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_PATH = ROOT / "reports" / "matrix_claim_audit_replay_current.json"
 
 
-def create_app(*, driver_factory=MovieAgentDriver, default_model: str | None = None,
-               data_dir: Path | None = None) -> FastAPI:
-    service = SessionService(driver_factory, default_model=default_model or os.getenv("AGENT_MODEL", "gpt-5.4-mini"),
-                             data_dir=data_dir)
+def create_app(
+    *,
+    driver_factory=MovieAgentDriver,
+    default_model: str | None = None,
+    data_dir: Path | None = None,
+) -> FastAPI:
+    service = SessionService(
+        driver_factory,
+        default_model=default_model or os.getenv("AGENT_MODEL", "gpt-5.4-mini"),
+        data_dir=data_dir,
+    )
 
     @asynccontextmanager
     async def lifespan(app):
         yield
         await service.close()
 
-    app = FastAPI(title="Movie Evidence Agent", version=PROTOCOL_VERSION, lifespan=lifespan)
+    app = FastAPI(
+        title="Movie Evidence Agent", version=PROTOCOL_VERSION, lifespan=lifespan
+    )
     app.state.sessions = service
-    origins = os.getenv("AGENT_WEB_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
-    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type", "Last-Event-ID"])
+    origins = os.getenv(
+        "AGENT_WEB_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Content-Type", "Last-Event-ID"],
+    )
 
     @app.exception_handler(SessionError)
     async def session_error(request, exc):
@@ -41,16 +56,40 @@ def create_app(*, driver_factory=MovieAgentDriver, default_model: str | None = N
 
     @app.get("/api/v1/capabilities")
     async def capabilities():
-        return {"protocol_version": PROTOCOL_VERSION, "name": "Movie Evidence Agent", "default_model": service.default_model,
-                "features": ["progress", "clarification", "reports", "evidence", "cancellation", "retry"],
-                "example_available": EXAMPLE_PATH.exists(), "max_query_chars": 12000,
-                "storage": "sqlite"}
+        return {
+            "protocol_version": PROTOCOL_VERSION,
+            "name": "Movie Evidence Agent",
+            "default_model": service.default_model,
+            "features": [
+                "progress",
+                "clarification",
+                "reports",
+                "evidence",
+                "cancellation",
+                "retry",
+            ],
+            "example_available": EXAMPLE_PATH.exists(),
+            "max_query_chars": 12000,
+            "storage": "sqlite",
+        }
 
     @app.get("/api/v1/sessions")
     async def sessions():
-        return {"items": [{"id": h.view.id, "title": h.view.title, "updated_at": h.view.updated_at,
-                           "status": h.view.run.status if h.view.run else "idle"}
-                          for h in sorted(service.sessions.values(), key=lambda s: s.view.updated_at, reverse=True)]}
+        return {
+            "items": [
+                {
+                    "id": h.view.id,
+                    "title": h.view.title,
+                    "updated_at": h.view.updated_at,
+                    "status": h.view.run.status if h.view.run else "idle",
+                }
+                for h in sorted(
+                    service.sessions.values(),
+                    key=lambda s: s.view.updated_at,
+                    reverse=True,
+                )
+            ]
+        }
 
     @app.post("/api/v1/sessions", status_code=201)
     async def create_session(body: CreateSession):
@@ -81,7 +120,12 @@ def create_app(*, driver_factory=MovieAgentDriver, default_model: str | None = N
         return service.retry(session_id, run_id)
 
     @app.get("/api/v1/sessions/{session_id}/events")
-    async def events(session_id: str, request: Request, after: int = -1, last_event_id: str | None = Header(default=None)):
+    async def events(
+        session_id: str,
+        request: Request,
+        after: int = -1,
+        last_event_id: str | None = Header(default=None),
+    ):
         hosted = service.get(session_id)
 
         async def stream():
@@ -92,23 +136,39 @@ def create_app(*, driver_factory=MovieAgentDriver, default_model: str | None = N
             while not hosted.closed and not await request.is_disconnected():
                 if hosted.view.revision > seen:
                     seen = hosted.view.revision
-                    data = {"protocol_version": PROTOCOL_VERSION, "type": "session.updated", "session": hosted.view.model_dump(mode="json")}
+                    data = {
+                        "protocol_version": PROTOCOL_VERSION,
+                        "type": "session.updated",
+                        "session": hosted.view.model_dump(mode="json"),
+                    }
                     yield f"id: {seen}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
                 try:
                     async with hosted.condition:
-                        await asyncio.wait_for(hosted.condition.wait_for(lambda: hosted.closed or hosted.view.revision > seen), timeout=15)
+                        await asyncio.wait_for(
+                            hosted.condition.wait_for(
+                                lambda: hosted.closed or hosted.view.revision > seen
+                            ),
+                            timeout=15,
+                        )
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
 
-        return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/api/v1/example-report")
     async def example():
         if not EXAMPLE_PATH.exists():
             raise SessionError(404, "本地还没有保存的示例报告。")
         saved = json.loads(EXAMPLE_PATH.read_text(encoding="utf-8"))
-        return {"query": saved.get("question", "《黑客帝国》的演员表演"),
-                "report": report_from_answer(saved["answer"], title="The Matrix · 1999"), "kind": "saved_example"}
+        return {
+            "query": saved.get("question", "《黑客帝国》的演员表演"),
+            "report": report_from_answer(saved["answer"], title="The Matrix · 1999"),
+            "kind": "saved_example",
+        }
 
     # API routes precede the static mount, preserving one-origin production use.
     dist = ROOT / "frontend" / "dist"

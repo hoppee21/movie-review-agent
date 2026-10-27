@@ -1,30 +1,27 @@
 """Collect helpful IMDb user reviews."""
 
 import asyncio
-import json
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from playwright.async_api import Locator, Page, TimeoutError, async_playwright
 
-from config import load_source_cookie
+from app.tools.core.review_io import parse_cookie_header, save_reviews
 from app.tools.core.tool import Tool
-
+from config import load_source_cookie
 
 IMDB_ID = "tt0133093"
 TARGET_REVIEWS = 400
 OUTPUT_FILE = "imdb_top400_reviews.json"
 
-PROFILE_DIR = "imdb_profile"
 LOAD_DELAY_SECONDS = 5
 LOAD_RETRY_DELAY_MS = 2_000
 LOAD_GROWTH_TIMEOUT_MS = 30_000
 MAX_IDLE_LOAD_ROUNDS = 3
 REVIEW_SELECTOR = "[data-testid='review-card-parent']"
 LOAD_BUTTON_SELECTOR = (
-    "button[data-testid='load-more-trigger'], "
-    "button.ipc-see-more__button"
+    "button[data-testid='load-more-trigger'], button.ipc-see-more__button"
 )
 
 
@@ -86,14 +83,14 @@ async def collect_imdb_reviews(
 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=False)
-        context = await browser.new_context(locale="en-US")
-
-        cookie = load_source_cookie("imdb")
-        if cookie:
-            await context.add_cookies(parse_cookie_header(cookie))
-
-        page = await context.new_page()
         try:
+            context = await browser.new_context(locale="en-US")
+            cookie = load_source_cookie("imdb")
+            if cookie:
+                await context.add_cookies(
+                    parse_cookie_header(cookie, domain=".imdb.com")
+                )
+            page = await context.new_page()
             response = await page.goto(
                 reviews_url(imdb_url),
                 wait_until="domcontentloaded",
@@ -117,7 +114,7 @@ async def collect_imdb_reviews(
 
 def reviews_url(imdb_url: str) -> str:
     return (
-        f"{imdb_url.rstrip('/')}/reviews/"
+        f"https://www.imdb.com/title/{parse_imdb_id(imdb_url)}/reviews/"
         "?sort=totalVotes&dir=desc&ratingFilter=0"
     )
 
@@ -156,7 +153,7 @@ async def load_reviews(page: Page, limit: int) -> int:
         await wait_before_load_retry(page)
 
 
-async def find_load_button(page: Page) -> Optional[Locator]:
+async def find_load_button(page: Page) -> Locator | None:
     buttons = page.locator(LOAD_BUTTON_SELECTOR)
     for index in range(await buttons.count() - 1, -1, -1):
         button = buttons.nth(index)
@@ -164,14 +161,18 @@ async def find_load_button(page: Page) -> Optional[Locator]:
             continue
         if await button.get_attribute("data-testid") == "load-more-trigger":
             return button
-        label = " ".join(
-            value
-            for value in (
-                await button.inner_text(),
-                await button.get_attribute("aria-label"),
+        label = (
+            " ".join(
+                value
+                for value in (
+                    await button.inner_text(),
+                    await button.get_attribute("aria-label"),
+                )
+                if value
             )
-            if value
-        ).strip().lower()
+            .strip()
+            .lower()
+        )
         if (
             "load more" in label
             or "see all" in label
@@ -245,7 +246,7 @@ async def parse_review(card: Locator, imdb_id: str) -> dict[str, Any]:
     }
 
 
-async def review_id(card: Locator) -> Optional[str]:
+async def review_id(card: Locator) -> str | None:
     value = await card.get_attribute("data-review-id")
     if value:
         return value
@@ -257,7 +258,7 @@ async def review_id(card: Locator) -> Optional[str]:
     return match.group(1) if match else None
 
 
-async def first_text(card: Locator, *selectors: str) -> Optional[str]:
+async def first_text(card: Locator, *selectors: str) -> str | None:
     for selector in selectors:
         locator = card.locator(selector).first
         if await locator.count():
@@ -269,25 +270,6 @@ async def first_text(card: Locator, *selectors: str) -> Optional[str]:
 
 def to_int(value: str) -> int:
     return int(value.replace(",", ""))
-
-
-def parse_cookie_header(header: str) -> list[dict[str, str]]:
-    values = {}
-    for part in header.split(";"):
-        if "=" in part:
-            name, value = part.strip().split("=", 1)
-            values[name] = value.strip('"')
-    return [
-        {"name": name, "value": value, "domain": ".imdb.com", "path": "/"}
-        for name, value in values.items()
-    ]
-
-
-def save_reviews(path: Path, reviews: list[dict[str, Any]]) -> None:
-    path.write_text(
-        json.dumps(reviews, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
 
 
 async def main() -> None:

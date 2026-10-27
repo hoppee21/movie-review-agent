@@ -6,7 +6,6 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-
 PROJECT_ROOT = Path(__file__).resolve().parent
 ENV_CONFIG_PATH = PROJECT_ROOT / ".env.local"
 COOKIE_CONFIG_PATH = PROJECT_ROOT / "config" / "source_cookies.json"
@@ -70,9 +69,7 @@ class RagConfig:
         if not 0 <= self.bm25_b <= 1:
             raise ValueError("bm25_b must be in [0, 1]")
         if self.first_stage_min_k > self.first_stage_max_k:
-            raise ValueError(
-                "first_stage_min_k cannot exceed first_stage_max_k"
-            )
+            raise ValueError("first_stage_min_k cannot exceed first_stage_max_k")
         if self.min_relevant_per_platform > self.final_evidence_per_platform:
             raise ValueError(
                 "min_relevant_per_platform cannot exceed final_evidence_per_platform"
@@ -105,6 +102,10 @@ def load_source_cookie(source: str) -> str:
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Invalid Cookie config: {COOKIE_CONFIG_PATH}") from exc
 
+    if not isinstance(config, dict):
+        raise RuntimeError(
+            f"Cookie config must contain a JSON object: {COOKIE_CONFIG_PATH}"
+        )
     value = config.get(source, "")
     if not isinstance(value, str):
         raise RuntimeError(f"Cookie config value must be a string: {source}")

@@ -31,7 +31,6 @@ from app.agent.schemas.plan import (
 from app.agent.schemas.request import RequestAnalysis
 from app.agent.schemas.state import AgentState
 
-
 CHECKPOINT_MODEL_TYPES = (
     Action,
     ActionStatus,

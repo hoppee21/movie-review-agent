@@ -20,23 +20,35 @@ async def main() -> None:
         help="当前 OpenAI 项目可调用的模型名称",
     )
     parser.add_argument(
-        "--reasoning-effort", choices=["none", "low", "medium", "high", "xhigh"],
+        "--reasoning-effort",
+        choices=["none", "low", "medium", "high", "xhigh"],
         help="推理预算；gpt-5.4-mini 默认 medium，其他模型保留 API 默认值。",
     )
     args = parser.parse_args()
 
     logging.basicConfig(
-        level=logging.WARNING, format="[%(asctime)s] %(message)s", datefmt="%H:%M:%S",
+        level=logging.WARNING,
+        format="[%(asctime)s] %(message)s",
+        datefmt="%H:%M:%S",
     )
     logging.getLogger("app").setLevel(logging.INFO)
     logging.getLogger("app").info(
         "开始处理问题；模型 %s，单次 API 超时 %.0f 秒，最多重试 %d 次",
-        args.model, API_TIMEOUT_SECONDS, API_MAX_RETRIES,
+        args.model,
+        API_TIMEOUT_SECONDS,
+        API_MAX_RETRIES,
     )
-    with record_run(entrypoint="cli", query=args.query, model=args.model, reasoning_effort=args.reasoning_effort) as recorder:
+    with record_run(
+        entrypoint="cli",
+        query=args.query,
+        model=args.model,
+        reasoning_effort=args.reasoning_effort,
+    ) as recorder:
         print(f"运行记录：{recorder.directory}", flush=True)
         api_key = load_openai_api_key()
-        llm = build_openai_chat_model(args.model, api_key=api_key, reasoning_effort=args.reasoning_effort)
+        llm = build_openai_chat_model(
+            args.model, api_key=api_key, reasoning_effort=args.reasoning_effort
+        )
         agent = MovieAgent(
             llm,
             rag_runtime=build_openai_rag_runtime(llm, api_key=api_key),
@@ -50,15 +62,21 @@ async def main() -> None:
             reply = input("补充信息：")
             while not reply.strip():
                 reply = input("请输入补充信息：")
-            recorder.event("clarification.replied", issue_id=clarification.get("issue_id"), reply=reply)
+            recorder.event(
+                "clarification.replied",
+                issue_id=clarification.get("issue_id"),
+                reply=reply,
+            )
             state = await agent.resume(reply, thread_id="cli")
 
         recorder.write_result(state["final_result"])
-        print(json.dumps(
-            state["final_result"].model_dump(mode="json"),
-            ensure_ascii=False,
-            indent=2,
-        ))
+        print(
+            json.dumps(
+                state["final_result"].model_dump(mode="json"),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
 
 
 if __name__ == "__main__":

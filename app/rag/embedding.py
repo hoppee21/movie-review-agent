@@ -3,6 +3,7 @@
 from typing import Protocol
 
 from langchain_core.embeddings import Embeddings
+
 from app.progress import progress
 
 

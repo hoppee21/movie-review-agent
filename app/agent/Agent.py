@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
@@ -14,6 +14,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
 from app.agent.controller import (
+    ControllerNode,
     apply_action_result,
     finalize_state,
     next_node,
@@ -26,36 +27,24 @@ from app.agent.movie_state import (
     movie_updates,
 )
 from app.agent.planner import PlanBuilder, compile_plan
-from app.agent.request_analyzer import RequestAnalyzer
 from app.agent.rag_handlers import register_rag_actions
+from app.agent.request_analyzer import RequestAnalyzer
 from app.agent.resolution import next_resolution_invocation
 from app.agent.schemas import (
+    CHECKPOINT_MODEL_TYPES,
     ActionInvocation,
     AgentState,
-    CHECKPOINT_MODEL_TYPES,
     ClarificationIssue,
     ClarificationReply,
     ExecutionMode,
     ExecutionPlan,
-    PlanIntent,
     RequestAnalysis,
-    TaskType,
 )
-from app.tools.registry import ActionRegistry
 from app.run_log import record_event
+from app.tools.registry import ActionRegistry
 
 if TYPE_CHECKING:
     from app.rag.runtime import RagRuntime
-
-
-ControllerDestination = Literal[
-    "analyze_movie",
-    "analyze_request",
-    "resolve_next",
-    "build_plan",
-    "execute_action",
-    "finalize",
-]
 
 
 class MovieAgent:
@@ -71,9 +60,7 @@ class MovieAgent:
         max_clarification_rounds: int = 3,
     ) -> None:
         if action_registry is not None and rag_runtime is not None:
-            raise ValueError(
-                "Pass either action_registry or rag_runtime, not both"
-            )
+            raise ValueError("Pass either action_registry or rag_runtime, not both")
         self.movie_analyzer = MovieAnalyzer(llm)
         self.request_analyzer = RequestAnalyzer(llm)
         self.plan_builder = PlanBuilder(llm)
@@ -176,8 +163,7 @@ class MovieAgent:
         option_ids = {
             option["option_id"]
             for option in payload.get("options", [])
-            if isinstance(option, dict)
-            and isinstance(option.get("option_id"), str)
+            if isinstance(option, dict) and isinstance(option.get("option_id"), str)
         }
         if parsed.option_id is not None and parsed.option_id not in option_ids:
             raise ValueError("reply option_id is not in pending clarification")
@@ -198,12 +184,11 @@ class MovieAgent:
 
     async def _analyze_request(self, state: AgentState) -> AgentState:
         record_event("agent.request_analysis.started")
-        result = await self.request_analyzer.analyze(
+        analysis = await self.request_analyzer.analyze(
             state["user_query"],
             movie_context(state.get("movie_targets", [])),
             clarification_messages(state.get("clarification_history", [])),
         )
-        analysis = RequestAnalysis.model_validate(result)
         record_event("agent.request_analysis.completed", analysis=analysis)
         return {"request_analysis": analysis}
 
@@ -213,13 +198,10 @@ class MovieAgent:
             raise RuntimeError("Cannot plan before request analysis")
         request = RequestAnalysis.model_validate(request)
         record_event("agent.plan.started", question=request.question)
-        result = await self.plan_builder.analyze(
+        intent = await self.plan_builder.analyze(
             request.question,
             movie_context(state.get("movie_targets", [])),
         )
-        intent = PlanIntent.model_validate(result)
-        if not intent.platforms and intent.task != TaskType.UNSUPPORTED:
-            intent = intent.model_copy(update={"platforms": ["imdb", "douban"]})
         plan = compile_plan(intent, state.get("movie_targets", []))
         record_event("agent.plan.completed", plan=plan)
         return {"execution_plan": plan, "plan_cursor": 0}
@@ -227,7 +209,7 @@ class MovieAgent:
     def _controller(
         self,
         state: AgentState,
-    ) -> Command[ControllerDestination]:
+    ) -> Command[ControllerNode]:
         destination = next_node(state)
         update: dict[str, Any] | None = None
         if destination == "execute_action":
@@ -256,9 +238,7 @@ class MovieAgent:
         invocation = state.get("active_action")
         if invocation is None:
             raise RuntimeError("execute_action requires an active action")
-        return {
-            "action_result": await self.executor.execute(invocation, state)
-        }
+        return {"action_result": await self.executor.execute(invocation, state)}
 
     @staticmethod
     def _apply_result(state: AgentState) -> dict[str, Any]:
@@ -267,7 +247,10 @@ class MovieAgent:
     @staticmethod
     def _finalize(state: AgentState) -> AgentState:
         updates = finalize_state(state)
-        record_event("agent.finalized", result=updates.get("final_result", state.get("final_result")))
+        record_event(
+            "agent.finalized",
+            result=updates.get("final_result", state.get("final_result")),
+        )
         return updates
 
     @staticmethod

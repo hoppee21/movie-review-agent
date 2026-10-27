@@ -36,3 +36,4 @@ htmlcov/
 *.tsbuildinfo
 node_modules/
 frontend/dist/
+frontend/.test-build/

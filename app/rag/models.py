@@ -5,7 +5,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
 ReviewPlatform = Literal["imdb", "douban"]
 
 
@@ -124,7 +123,9 @@ class CoverageGap(BaseModel):
 
 
 class HydePassage(BaseModel):
-    gap_index: int = Field(ge=1, description="One-based index of the supplied coverage gap.")
+    gap_index: int = Field(
+        ge=1, description="One-based index of the supplied coverage gap."
+    )
     text: str = Field(min_length=1, max_length=1500)
 
     @field_validator("text")
@@ -333,14 +334,20 @@ class ClaimAudit(BaseModel):
 
 class OpinionInsight(BaseModel):
     claim: str = Field(min_length=1, description="证据支持的分析判断，不是情绪分类。")
-    reasoning: str = Field(min_length=1, description="解释评价标准、分歧或条件；推断须明确标注。")
+    reasoning: str = Field(
+        min_length=1, description="解释评价标准、分歧或条件；推断须明确标注。"
+    )
     evidence_ids: list[str] = Field(min_length=1)
     counterevidence_ids: list[str]
-    limitation: str = Field(min_length=1, description="反例、替代解释或不能推出的结论。")
+    limitation: str = Field(
+        min_length=1, description="反例、替代解释或不能推出的结论。"
+    )
 
 
 class EvidenceCard(BaseModel):
-    citation_id: str = Field(description="Answer-local short citation, mapped to the persistent evidence_id.")
+    citation_id: str = Field(
+        description="Answer-local short citation, mapped to the persistent evidence_id."
+    )
     evidence_id: str
     chunk_id: str
     platform: ReviewPlatform

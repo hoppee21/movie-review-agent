@@ -16,7 +16,6 @@ from uuid import uuid4
 import numpy as np
 
 from app.rag.embedding import EmbeddingProvider
-from app.run_log import record_event
 from app.rag.models import (
     IndexArtifact,
     RetrievalResult,
@@ -24,8 +23,8 @@ from app.rag.models import (
     ReviewDocument,
     ReviewPlatform,
 )
+from app.run_log import record_event
 from config import RagConfig
-
 
 _TOKEN_PATTERN = re.compile(r"[a-z0-9]+|[\u3400-\u4dbf\u4e00-\u9fff]+")
 _WHITESPACE = re.compile(r"\s+")
@@ -54,7 +53,9 @@ class BM25Index:
 
     def __init__(self, texts: Sequence[str]) -> None:
         self.term_frequencies = [Counter(tokenize(text)) for text in texts]
-        self.document_lengths = [sum(values.values()) for values in self.term_frequencies]
+        self.document_lengths = [
+            sum(values.values()) for values in self.term_frequencies
+        ]
         self.document_frequency: Counter[str] = Counter()
         for values in self.term_frequencies:
             self.document_frequency.update(values.keys())
@@ -81,9 +82,7 @@ class BM25Index:
             return []
 
         indices = list(
-            range(self.document_count)
-            if allowed_indices is None
-            else allowed_indices
+            range(self.document_count) if allowed_indices is None else allowed_indices
         )
         if not indices:
             return []
@@ -93,13 +92,11 @@ class BM25Index:
             document_frequency = self.document_frequency
         else:
             document_count = len(indices)
-            average_length = sum(
-                self.document_lengths[index] for index in indices
-            ) / document_count
+            average_length = (
+                sum(self.document_lengths[index] for index in indices) / document_count
+            )
             document_frequency = Counter(
-                term
-                for index in indices
-                for term in self.term_frequencies[index]
+                term for index in indices for term in self.term_frequencies[index]
             )
         scored: list[tuple[int, float]] = []
         for index in indices:
@@ -117,9 +114,7 @@ class BM25Index:
                     / (term_document_frequency + 0.5)
                 )
                 normalizer = frequency + k1 * (
-                    1
-                    - b
-                    + b * length / (average_length or 1.0)
+                    1 - b + b * length / (average_length or 1.0)
                 )
                 score += inverse_frequency * frequency * (k1 + 1) / normalizer
             if score > 0:
@@ -153,9 +148,9 @@ class EphemeralOpinionIndex:
             for index, chunk in enumerate(self.chunks):
                 grouped[chunk.platform].append(index)
             self.platform_indices = {
-                platform: tuple(indices)
-                for platform, indices in grouped.items()
+                platform: tuple(indices) for platform, indices in grouped.items()
             }
+
 
 class EphemeralRagStore:
     """Own transient indexes and retrieval results for the current process."""
@@ -221,7 +216,11 @@ class OpinionIndexBuilder:
         fingerprint = self._fingerprint(paths.values())
         cached = self.store.find_index(fingerprint)
         if cached is not None:
-            record_event("rag.index_reused", fingerprint=fingerprint, artifact=self._artifact(cached))
+            record_event(
+                "rag.index_reused",
+                fingerprint=fingerprint,
+                artifact=self._artifact(cached),
+            )
             return self._artifact(cached)
 
         documents: dict[str, ReviewDocument] = {}
@@ -256,9 +255,7 @@ class OpinionIndexBuilder:
             )
             for position, piece in enumerate(pieces):
                 embed_source = (
-                    f"{document.title}\n\n{piece}"
-                    if document.title
-                    else piece
+                    f"{document.title}\n\n{piece}" if document.title else piece
                 )
                 chunks.append(
                     ReviewChunk(
@@ -270,13 +267,18 @@ class OpinionIndexBuilder:
                     )
                 )
 
-        logger.info("已整理 %d 条独立评论，切分为 %d 个片段", len(documents), len(chunks))
+        logger.info(
+            "已整理 %d 条独立评论，切分为 %d 个片段", len(documents), len(chunks)
+        )
         record_event(
-            "rag.index_input", paths={platform: str(path) for platform, path in paths.items()},
-            fingerprint=fingerprint, input_counts=input_counts,
+            "rag.index_input",
+            paths={platform: str(path) for platform, path in paths.items()},
+            fingerprint=fingerprint,
+            input_counts=input_counts,
             document_counts=dict(Counter(item.platform for item in documents.values())),
             chunk_counts=dict(Counter(item.platform for item in chunks)),
-            embedding_model=self.embedder.name, config=asdict(self.config),
+            embedding_model=self.embedder.name,
+            config=asdict(self.config),
         )
         vectors = await self.embedder.embed_documents(
             [chunk.embed_text for chunk in chunks]
@@ -292,8 +294,12 @@ class OpinionIndexBuilder:
             embedding_model=self.embedder.name,
         )
         self.store.put_index(index)
-        record_event("rag.index_built", fingerprint=fingerprint, artifact=self._artifact(index),
-                     vector_shape=list(matrix.shape))
+        record_event(
+            "rag.index_built",
+            fingerprint=fingerprint,
+            artifact=self._artifact(index),
+            vector_shape=list(matrix.shape),
+        )
         return self._artifact(index)
 
     def _fingerprint(self, paths: Iterable[Path]) -> str:
@@ -327,8 +333,7 @@ class OpinionIndexBuilder:
             review_count=len(index.documents),
             chunk_count=len(index.chunks),
             platform_counts={
-                platform: counts.get(platform, 0)
-                for platform in ("imdb", "douban")
+                platform: counts.get(platform, 0) for platform in ("imdb", "douban")
             },
             embedding_model=index.embedding_model,
         )
@@ -379,16 +384,10 @@ def _normalize_document(
         date=_optional_text(raw.get("date")),
         rating=_optional_number(raw.get("rating")),
         helpful_votes=_optional_integer(
-            raw.get("helpful_votes")
-            if platform == "imdb"
-            else raw.get("votes")
+            raw.get("helpful_votes") if platform == "imdb" else raw.get("votes")
         ),
         total_votes=_optional_integer(raw.get("total_votes")),
-        metadata={
-            key: value
-            for key, value in raw.items()
-            if key not in known_fields
-        },
+        metadata={key: value for key, value in raw.items() if key not in known_fields},
     )
 
 

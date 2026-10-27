@@ -112,12 +112,15 @@ class WikidataQueryService(Tool):
         candidates = self._parse_candidates(rows)
         series = {
             item["wikidata_id"]: item["title"]
-            for item in candidates if item["entity_type"] == "series"
+            for item in candidates
+            if item["entity_type"] == "series"
         }
         for item in candidates:
             series.update(item["series"])
         if series and not identifier:
-            rows.extend(self._request_results(self._build_series_query(list(series)[:5])))
+            rows.extend(
+                self._request_results(self._build_series_query(list(series)[:5]))
+            )
             candidates = self._parse_candidates(rows)
         movies = [item for item in candidates if item["entity_type"] == "movie"]
         if identifier and candidates and not movies:
@@ -130,26 +133,35 @@ class WikidataQueryService(Tool):
 
         if release_year is not None:
             movies = [
-                item for item in movies
+                item
+                for item in movies
                 if not item["release_years"] or release_year in item["release_years"]
             ]
-        ordinal_matches = [
-            item for item in movies if installment in item["installments"]
-        ] if installment is not None else []
+        ordinal_matches = (
+            [item for item in movies if installment in item["installments"]]
+            if installment is not None
+            else []
+        )
         if ordinal_matches:
             movies = ordinal_matches
 
         if len(movies) == 1:
             item = movies[0]
             year_matches = release_year is None or release_year in item["release_years"]
-            installment_matches = installment is None or installment in item["installments"]
+            installment_matches = (
+                installment is None or installment in item["installments"]
+            )
             has_constraint = (
-                identifier is not None or release_year is not None or installment is not None
+                identifier is not None
+                or release_year is not None
+                or installment is not None
             )
             if year_matches and installment_matches and has_constraint:
                 return self._resolved_result(movie_query, item)
 
-        options = sorted(movies, key=lambda item: (item["release_year"] or 9999, item["title"]))
+        options = sorted(
+            movies, key=lambda item: (item["release_year"] or 9999, item["title"])
+        )
         if release_year is None and installment is None:
             options.extend(
                 {"wikidata_id": qid, "title": title, "entity_type": "series"}
@@ -190,25 +202,45 @@ class WikidataQueryService(Tool):
             release_date = row.get("releaseDate", {}).get("value", "")
             year_match = re.match(r"(\d{4})", release_date)
 
-            candidate = candidates.setdefault(wikidata_id, {
-                "wikidata_id": wikidata_id,
-                "title": label,
-                "entity_type": "series" if row.get("isSeries", {}).get("value") in {"true", "1"} else "movie",
-                "release_years": [], "installments": [], "series": {},
-                "release_year": None, "imdb_url": None, "douban_url": None,
-            })
+            candidate = candidates.setdefault(
+                wikidata_id,
+                {
+                    "wikidata_id": wikidata_id,
+                    "title": label,
+                    "entity_type": "series"
+                    if row.get("isSeries", {}).get("value") in {"true", "1"}
+                    else "movie",
+                    "release_years": [],
+                    "installments": [],
+                    "series": {},
+                    "release_year": None,
+                    "imdb_url": None,
+                    "douban_url": None,
+                },
+            )
             if year_match:
-                candidate["release_years"] = sorted(set([*candidate["release_years"], int(year_match.group(1))]))
+                candidate["release_years"] = sorted(
+                    set([*candidate["release_years"], int(year_match.group(1))])
+                )
                 candidate["release_year"] = candidate["release_years"][0]
-            for field, template in (("imdbId", "https://www.imdb.com/title/{}/"), ("doubanId", "https://movie.douban.com/subject/{}/")):
+            for field, template in (
+                ("imdbId", "https://www.imdb.com/title/{}/"),
+                ("doubanId", "https://movie.douban.com/subject/{}/"),
+            ):
                 if value := row.get(field, {}).get("value"):
-                    candidate["imdb_url" if field == "imdbId" else "douban_url"] = template.format(value)
+                    candidate["imdb_url" if field == "imdbId" else "douban_url"] = (
+                        template.format(value)
+                    )
             if series_id := row.get("series", {}).get("value", "").rsplit("/", 1)[-1]:
                 if re.fullmatch(r"Q[1-9]\d*", series_id):
-                    candidate["series"][series_id] = row.get("seriesLabel", {}).get("value", series_id)
+                    candidate["series"][series_id] = row.get("seriesLabel", {}).get(
+                        "value", series_id
+                    )
             ordinal = row.get("ordinal", {}).get("value", "")
             if ordinal.isdigit():
-                candidate["installments"] = sorted(set([*candidate["installments"], int(ordinal)]))
+                candidate["installments"] = sorted(
+                    set([*candidate["installments"], int(ordinal)])
+                )
             if description:
                 candidate["description"] = description
         return list(candidates.values())
@@ -228,7 +260,9 @@ class WikidataQueryService(Tool):
                 with urlopen(request, timeout=self.timeout_seconds) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 rows = payload["results"]["bindings"]
-                if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                if not isinstance(rows, list) or any(
+                    not isinstance(row, dict) for row in rows
+                ):
                     raise ValueError("invalid result rows")
                 return rows
             except HTTPError as exc:
@@ -240,7 +274,9 @@ class WikidataQueryService(Tool):
                 time.sleep(self._retry_delay(exc, attempt))
             except (TimeoutError, URLError) as exc:
                 if attempt == self.max_attempts - 1:
-                    raise RuntimeError("电影资料查询暂不可用，无法核实作品，请稍后重试。") from exc
+                    raise RuntimeError(
+                        "电影资料查询暂不可用，无法核实作品，请稍后重试。"
+                    ) from exc
                 time.sleep(0.5 * (2**attempt))
             except (ValueError, KeyError, TypeError) as exc:
                 raise RuntimeError("电影资料服务返回了无效数据，请稍后重试。") from exc

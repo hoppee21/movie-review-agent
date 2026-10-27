@@ -130,7 +130,7 @@ export default function App() {
     </main>
     {sourcePanel && <EvidenceDrawer key={sourcePanel.ids.join("|")} report={sourcePanel.report} ids={sourcePanel.ids} onClose={closeSource} />}
     {settingsOpen && <Modal title="工作台设置" onClose={closeSettings}><div className="settings-content"><span className="settings-icon"><Icon name="settings" size={24} /></span><h2>为下一次分析做好准备</h2><p>选择新会话使用的模型。当前会话会保留自己的运行配置。</p><label htmlFor="model-setting">模型名称</label><input id="model-setting" value={modelDraft} onChange={event => setModelDraft(event.target.value)} placeholder={workspace.capabilities?.default_model || "输入后端可用的模型名称"} maxLength={200} />
-      <div className="settings-note"><Icon name="shield" size={16} /><span>密钥由后端管理，浏览器无需填写。历史会话保存在当前服务进程中。</span></div><button className="primary-button" disabled={!modelDraft.trim()} onClick={() => { workspace.updateModel(modelDraft); setQuery(""); setSettingsOpen(false); }}>保存并开始新会话<Icon name="arrow" size={16} /></button></div></Modal>}
+      <div className="settings-note"><Icon name="shield" size={16} /><span>密钥由后端管理，浏览器无需填写。历史会话保存在本地，重启服务后仍可查看。</span></div><button className="primary-button" disabled={!modelDraft.trim()} onClick={() => { workspace.updateModel(modelDraft); setQuery(""); setSettingsOpen(false); }}>保存并开始新会话<Icon name="arrow" size={16} /></button></div></Modal>}
     {toast && <div className="toast" role="status"><Icon name="check" size={16} />{toast}</div>}
   </div>;
 }

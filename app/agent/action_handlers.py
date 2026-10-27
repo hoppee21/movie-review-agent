@@ -1,12 +1,12 @@
 """Adapters from registered Actions to existing Tool contracts and interrupts."""
 
-from collections.abc import Awaitable, Callable, Iterable
 import re
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from langgraph.types import interrupt
 
-from app.agent.movie_state import numbers_in_text, target_label
+from app.agent.movie_state import get_movie_target, numbers_in_text, target_label
 from app.agent.schemas import (
     Action,
     ActionInvocation,
@@ -28,8 +28,7 @@ from app.agent.schemas import (
 from app.tools.core.collect_movie_reviews import CollectMovieReviews
 from app.tools.core.tool import Tool
 from app.tools.core.wikidata_query_service import WikidataQueryService
-from app.tools.registry import ActionRegistry
-
+from app.tools.registry import ActionHandler, ActionRegistry
 
 RegistryExtension = Callable[[ActionRegistry], None]
 
@@ -68,23 +67,12 @@ def build_default_registry(
     return registry
 
 
-def _target(state: AgentState, target_id: str | None) -> MovieTarget:
-    if target_id is None:
-        raise RuntimeError("Action requires a target_id")
-    for raw_target in state.get("movie_targets", []):
-        target = MovieTarget.model_validate(raw_target)
-        if target.target_id == target_id:
-            return target
-    raise RuntimeError(f"Movie target not found: {target_id}")
-
-
 def _replace_target(
     state: AgentState,
     replacement: MovieTarget,
 ) -> list[MovieTarget]:
     targets = [
-        MovieTarget.model_validate(target)
-        for target in state.get("movie_targets", [])
+        MovieTarget.model_validate(target) for target in state.get("movie_targets", [])
     ]
     for index, target in enumerate(targets):
         if target.target_id == replacement.target_id:
@@ -100,7 +88,9 @@ def _resolved_target(target: MovieTarget, value: dict[str, Any]) -> MovieTarget:
         raise RuntimeError("Resolved movie is missing its verified Wikidata identity")
     return target.model_copy(
         update={
-            "english_title": str(value.get("title") or target.english_title or target.query),
+            "english_title": str(
+                value.get("title") or target.english_title or target.query
+            ),
             "release_year": value.get("release_year"),
             "status": MovieTargetStatus.RESOLVED,
             "wikidata_id": value.get("wikidata_id"),
@@ -110,14 +100,12 @@ def _resolved_target(target: MovieTarget, value: dict[str, Any]) -> MovieTarget:
     )
 
 
-def _tool_resolver_handler(tool: Tool) -> Callable[
-    [ActionInvocation, AgentState], Awaitable[ActionResult]
-]:
+def _tool_resolver_handler(tool: Tool) -> ActionHandler:
     async def handle(
         invocation: ActionInvocation,
         state: AgentState,
     ) -> ActionResult:
-        target = _target(state, invocation.step.target_id)
+        target = get_movie_target(state, invocation.step.target_id)
         if target.status == MovieTargetStatus.RESOLVED:
             return ActionResult(
                 status=ActionStatus.COMPLETED,
@@ -198,14 +186,18 @@ def _resolver_option(
 ) -> ClarificationOption:
     if candidate.get("entity_type") == "series":
         return ClarificationOption(
-            option_id=f"candidate-{index}", label=f"{candidate['title']}（整个系列）",
+            option_id=f"candidate-{index}",
+            label=f"{candidate['title']}（整个系列）",
             details={"wikidata_id": candidate["wikidata_id"], "entity_type": "series"},
             internal_patch=StatePatch(
-                set_values={"final_result": RunResult(
-                    status=RunStatus.UNSUPPORTED,
-                    reason="当前仅支持单部电影，暂不支持整个系列的联合处理。",
-                    data={"requested_series": candidate},
-                )}, authority=PatchAuthority.USER_CONFIRMED,
+                set_values={
+                    "final_result": RunResult(
+                        status=RunStatus.UNSUPPORTED,
+                        reason="当前仅支持单部电影，暂不支持整个系列的联合处理。",
+                        data={"requested_series": candidate},
+                    )
+                },
+                authority=PatchAuthority.USER_CONFIRMED,
             ),
         )
     resolved = _resolved_target(target, candidate)
@@ -228,19 +220,19 @@ def _resolver_option(
     )
 
 
-def _tool_collector_handler(tool: Tool) -> Callable[
-    [ActionInvocation, AgentState], Awaitable[ActionResult]
-]:
+def _tool_collector_handler(tool: Tool) -> ActionHandler:
     async def handle(
         invocation: ActionInvocation,
         state: AgentState,
     ) -> ActionResult:
-        target = _target(state, invocation.step.target_id)
+        target = get_movie_target(state, invocation.step.target_id)
         if not target.imdb_url or not target.douban_url:
             return ActionResult(
                 status=ActionStatus.UNSUPPORTED,
-                output={"reason": "已核实电影身份，但缺少 IMDb 或豆瓣链接，当前无法采集双平台评论。",
-                        "movie": target.model_dump(mode="json")},
+                output={
+                    "reason": "已核实电影身份，但缺少 IMDb 或豆瓣链接，当前无法采集双平台评论。",
+                    "movie": target.model_dump(mode="json"),
+                },
             )
         result = await tool.execute(
             {"imdb_url": target.imdb_url, "douban_url": target.douban_url}
@@ -263,9 +255,7 @@ def _tool_collector_handler(tool: Tool) -> Callable[
     return handle
 
 
-def _ask_user_handler(max_rounds: int) -> Callable[
-    [ActionInvocation, AgentState], Awaitable[ActionResult]
-]:
+def _ask_user_handler(max_rounds: int) -> ActionHandler:
     async def handle(
         invocation: ActionInvocation,
         state: AgentState,
@@ -309,9 +299,7 @@ def _ask_user_handler(max_rounds: int) -> Callable[
             pending_issues=issues[1:],
             clarification_rounds=state.get("clarification_rounds", 0) + 1,
         )
-        append_values = (
-            dict(selected_patch.append_values) if selected_patch else {}
-        )
+        append_values = dict(selected_patch.append_values) if selected_patch else {}
         append_values.setdefault("clarification_history", []).append(record)
         invalidates = list(selected_patch.invalidates) if selected_patch else []
         if reply.text:
@@ -357,14 +345,14 @@ def _selected_option(
     number = numbers.pop()
     if match.group(2) == "部":
         matches = [
-            item for item in issue.options
+            item
+            for item in issue.options
             if number in item.details.get("installments", [])
         ]
     elif 1 <= number <= len(issue.options):
         return issue.options[number - 1]
     else:
         matches = [
-            item for item in issue.options
-            if item.details.get("release_year") == number
+            item for item in issue.options if item.details.get("release_year") == number
         ]
     return matches[0] if len(matches) == 1 else None

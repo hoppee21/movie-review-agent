@@ -7,9 +7,9 @@ from app.agent.schemas import (
     ActionStatus,
     AgentState,
 )
-from app.tools.registry import ActionRegistry
 from app.progress import progress
 from app.run_log import record_event
+from app.tools.registry import ActionRegistry
 
 
 class Executor:
@@ -34,8 +34,13 @@ class Executor:
         else:
             with progress(f"阶段 {invocation.step.action.value}"):
                 result = await registration.handler(invocation, state)
-        record_event("action.completed", action=invocation.step.action, status=result.status,
-                     output=result.output, issue=result.issue)
+        record_event(
+            "action.completed",
+            action=invocation.step.action,
+            status=result.status,
+            output=result.output,
+            issue=result.issue,
+        )
         return result
 
 

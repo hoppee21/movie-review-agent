@@ -8,7 +8,6 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from app.agent.schemas.movie import MovieAnalysis
 
-
 SYSTEM_PROMPT = """
 识别电影请求及其实际目标，输出给定结构，不回答问题、不制定计划。
 - 区分非电影请求、没有具体作品的电影泛请求、指向具体作品的请求。

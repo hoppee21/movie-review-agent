@@ -1,20 +1,20 @@
 """Collect IMDb and Douban reviews from Wikidata-resolved URLs."""
 
-from pathlib import Path
 import logging
+from pathlib import Path
 from typing import Any
 
+from app.progress import progress
 from app.tools.core.get_douban import (
     collect_douban_reviews,
     parse_douban_id,
 )
 from app.tools.core.get_imdb import collect_imdb_reviews, parse_imdb_id
 from app.tools.core.tool import Tool
-from app.progress import progress
-
+from config import PROJECT_ROOT
 
 REVIEWS_PER_PLATFORM = 400
-OUTPUT_DIR = Path("movie_reviews")
+OUTPUT_DIR = PROJECT_ROOT / "movie_reviews"
 logger = logging.getLogger(__name__)
 
 
@@ -43,8 +43,8 @@ class CollectMovieReviews(Tool):
 
     async def execute(self, params: dict[str, Any]) -> dict[str, Any]:
         return await collect_movie_reviews(
-            imdb_url=str(params.get("imdb_url")),
-            douban_url=str(params.get("douban_url")),
+            imdb_url=params.get("imdb_url"),
+            douban_url=params.get("douban_url"),
         )
 
 
@@ -63,10 +63,14 @@ async def collect_movie_reviews(
     douban_path = output_dir / f"douban_{douban_id}.json"
 
     with progress("采集 IMDb 评论"):
-        imdb_reviews = await collect_imdb_reviews(imdb_url, imdb_path, REVIEWS_PER_PLATFORM)
+        imdb_reviews = await collect_imdb_reviews(
+            imdb_url, imdb_path, REVIEWS_PER_PLATFORM
+        )
     logger.info("IMDb 已保存 %d 条评论", len(imdb_reviews))
     with progress("采集豆瓣评论"):
-        douban_reviews = await collect_douban_reviews(douban_url, douban_path, REVIEWS_PER_PLATFORM)
+        douban_reviews = await collect_douban_reviews(
+            douban_url, douban_path, REVIEWS_PER_PLATFORM
+        )
     logger.info("豆瓣已保存 %d 条评论；接下来进入评论分析", len(douban_reviews))
 
     return {

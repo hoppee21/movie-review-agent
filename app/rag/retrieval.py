@@ -4,19 +4,16 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from typing import Any, Protocol, Sequence
+from typing import Protocol, Sequence
 from uuid import uuid4
 
 import numpy as np
 from langchain_core.language_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
-from pydantic import BaseModel
 
 from app.progress import progress
-from app.run_log import record_event
 from app.rag.embedding import EmbeddingProvider
 from app.rag.evidence import coverage_report, describe_gap, select_evidence
-from app.rag.movie_context import MOVIE_CONTEXT_GUIDANCE
 from app.rag.index import (
     EphemeralOpinionIndex,
     EphemeralRagStore,
@@ -35,11 +32,13 @@ from app.rag.models import (
     RetrievalResult,
     ReviewPlatform,
 )
+from app.rag.movie_context import MOVIE_CONTEXT_GUIDANCE
 from app.rag.reranker import OpinionReranker
+from app.run_log import record_event
 from config import RagConfig
 
-
-QUERY_SYSTEM_PROMPT = """
+QUERY_SYSTEM_PROMPT = (
+    """
 你只为一部电影的评论检索生成语义查询，不选择检索算法或数值参数。
 
 - 豆瓣查询使用中文，IMDb 查询使用英文。
@@ -51,10 +50,14 @@ QUERY_SYSTEM_PROMPT = """
 - 查询要覆盖直接表述、肯定、否定和复杂/矛盾观点；不要预设结论。
 - 每条查询绑定 imdb 或 douban，以及 primary/exact/subaspect/positive/negative/mixed 之一。
 - 不生成电影事实检索，不回答问题，不引用并不存在的评论。
-""".strip() + "\n\n" + MOVIE_CONTEXT_GUIDANCE
+""".strip()
+    + "\n\n"
+    + MOVIE_CONTEXT_GUIDANCE
+)
 
 
-HYDE_SYSTEM_PROMPT = """
+HYDE_SYSTEM_PROMPT = (
+    """
 你为召回不足的电影评论检索生成假设性段落。它们只作为 dense retrieval 查询，绝不是证据。
 
 - 每条段落绑定给定缺口的 gap_index；IMDb 用英文，豆瓣用中文，不能跨用平台或评价对象。
@@ -65,7 +68,10 @@ HYDE_SYSTEM_PROMPT = """
   不把百科对表演的评价改写成假设评论，也不把角色经历写成演员表演得到认可的原因。
 - 只针对给定缺口生成；有多个缺口时优先分别覆盖，不对同一个缺口反复改写。
 - 不声称这些文字来自真实用户，也不要使用具体用户、评分或数量。
-""".strip() + "\n\n" + MOVIE_CONTEXT_GUIDANCE
+""".strip()
+    + "\n\n"
+    + MOVIE_CONTEXT_GUIDANCE
+)
 
 
 class RetrievalQueryPlanner(Protocol):
@@ -105,12 +111,12 @@ class LLMRetrievalQueryPlanner:
                 ),
             ]
         )
-        output = llm.with_structured_output(
+        structured_model = llm.with_structured_output(
             RetrievalQueryPlan,
             method="json_schema",
             strict=True,
         )
-        self._chain = prompt | output
+        self._chain = prompt | structured_model
 
     async def plan(
         self,
@@ -129,7 +135,7 @@ class LLMRetrievalQueryPlanner:
                     "platforms": ", ".join(platforms),
                 }
             )
-        return RetrievalQueryPlan.model_validate(_model_data(value))
+        return RetrievalQueryPlan.model_validate(value)
 
 
 class LLMHydeGenerator:
@@ -147,12 +153,12 @@ class LLMHydeGenerator:
                 ),
             ]
         )
-        output = llm.with_structured_output(
+        structured_model = llm.with_structured_output(
             HydePlan,
             method="json_schema",
             strict=True,
         )
-        self._chain = prompt | output
+        self._chain = prompt | structured_model
 
     async def generate(
         self,
@@ -169,14 +175,16 @@ class LLMHydeGenerator:
                     "question": question,
                     "movie_context": movie_context or "未提供电影背景",
                     "aspect": aspect or "未单独指定，以用户问题为准",
-                    "gaps": "\n".join(f"{i}. {describe_gap(gap)}" for i, gap in enumerate(gaps, 1)),
+                    "gaps": "\n".join(
+                        f"{i}. {describe_gap(gap)}" for i, gap in enumerate(gaps, 1)
+                    ),
                     "evidence": "\n".join(
                         f"{item.platform} / {item.target} / {item.subaspect}: {item.opinion}"
                         for item in evidence
                     ),
                 }
             )
-        return HydePlan.model_validate(_model_data(value))
+        return HydePlan.model_validate(value)
 
 
 class OpinionRetriever:
@@ -223,8 +231,14 @@ class OpinionRetriever:
             aspect=aspect,
             platforms=selected_platforms,
         )
-        record_event("rag.query_plan", index_id=index_id, question=question,
-                     movie_context=movie_context, raw_plan=raw_plan, plan=query_plan)
+        record_event(
+            "rag.query_plan",
+            index_id=index_id,
+            question=question,
+            movie_context=movie_context,
+            raw_plan=raw_plan,
+            plan=query_plan,
+        )
         fusion = await self._hybrid_fusion(index, query_plan.queries)
         candidates = self._candidates(index, fusion, selected_platforms)
         _log_candidates(index_id, 1, candidates)
@@ -237,7 +251,8 @@ class OpinionRetriever:
         )
         seen_chunks = {item.chunk_id for item in candidates}
         evidence = select_evidence(
-            pool, platforms=selected_platforms,
+            pool,
+            platforms=selected_platforms,
             limit_per_platform=self.config.final_evidence_per_platform,
             minimum_reviews=self.config.min_relevant_per_platform,
         )
@@ -247,17 +262,37 @@ class OpinionRetriever:
             subaspects=query_plan.subaspects,
             minimum=self.config.min_relevant_per_platform,
         )
-        record_event("rag.retrieval_round", round=1, pool_count=len(pool),
-                     selected=evidence, coverage=coverage)
+        record_event(
+            "rag.retrieval_round",
+            round=1,
+            pool_count=len(pool),
+            selected=evidence,
+            coverage=coverage,
+        )
         rounds = 1
 
-        available_platforms = {chunk.platform for chunk in index.chunks if chunk.chunk_id not in seen_chunks}
+        available_platforms = {
+            chunk.platform
+            for chunk in index.chunks
+            if chunk.chunk_id not in seen_chunks
+        }
         gaps = [gap for gap in coverage.gaps if gap.platform in available_platforms]
         record_event(
-            "rag.followup_decision", proceed=bool(gaps and self.config.max_retrieval_rounds > 1),
-            reason=("coverage_sufficient" if not coverage.gaps else "corpus_exhausted" if not gaps
-                    else "round_limit" if self.config.max_retrieval_rounds <= 1 else "coverage_gaps"),
-            gaps=gaps, unavailable_gaps=[gap for gap in coverage.gaps if gap.platform not in available_platforms],
+            "rag.followup_decision",
+            proceed=bool(gaps and self.config.max_retrieval_rounds > 1),
+            reason=(
+                "coverage_sufficient"
+                if not coverage.gaps
+                else "corpus_exhausted"
+                if not gaps
+                else "round_limit"
+                if self.config.max_retrieval_rounds <= 1
+                else "coverage_gaps"
+            ),
+            gaps=gaps,
+            unavailable_gaps=[
+                gap for gap in coverage.gaps if gap.platform not in available_platforms
+            ],
         )
         if gaps and self.config.max_retrieval_rounds > 1:
             hyde_plan = await self.hyde_generator.generate(
@@ -275,14 +310,21 @@ class OpinionRetriever:
                 candidates = self._candidates(index, fallback, selected_platforms)
                 _log_candidates(index_id, 2, candidates)
                 if candidates:
-                    pool.extend(await self.reranker.rerank(
-                        question=question, aspect=aspect, candidates=candidates,
-                        subaspects=query_plan.subaspects,
-                        known_targets=list(dict.fromkeys(item.target for item in pool)),
-                        movie_context=movie_context,
-                    ))
+                    pool.extend(
+                        await self.reranker.rerank(
+                            question=question,
+                            aspect=aspect,
+                            candidates=candidates,
+                            subaspects=query_plan.subaspects,
+                            known_targets=list(
+                                dict.fromkeys(item.target for item in pool)
+                            ),
+                            movie_context=movie_context,
+                        )
+                    )
                 evidence = select_evidence(
-                    pool, platforms=selected_platforms,
+                    pool,
+                    platforms=selected_platforms,
                     limit_per_platform=self.config.final_evidence_per_platform,
                     minimum_reviews=self.config.min_relevant_per_platform,
                 )
@@ -292,8 +334,13 @@ class OpinionRetriever:
                     subaspects=query_plan.subaspects,
                     minimum=self.config.min_relevant_per_platform,
                 )
-                record_event("rag.retrieval_round", round=2, pool_count=len(pool),
-                             selected=evidence, coverage=coverage)
+                record_event(
+                    "rag.retrieval_round",
+                    round=2,
+                    pool_count=len(pool),
+                    selected=evidence,
+                    coverage=coverage,
+                )
                 rounds = 2
 
         result = RetrievalResult(
@@ -395,8 +442,11 @@ class OpinionRetriever:
         )
         for passage, vector in zip(passages, vectors, strict=True):
             platform = gaps[passage.gap_index - 1].platform
-            allowed = [i for i in index.platform_indices.get(platform, ())
-                       if index.chunks[i].chunk_id not in seen_chunks]
+            allowed = [
+                i
+                for i in index.platform_indices.get(platform, ())
+                if index.chunks[i].chunk_id not in seen_chunks
+            ]
             _add_ranking(
                 fusion,
                 _dense_search(
@@ -425,7 +475,9 @@ class OpinionRetriever:
                 ),
                 key=lambda item: (-item[1], item[0]),
             )
-            for chunk_index, value in ranked_indices[: self.config.candidate_cap_per_platform]:
+            for chunk_index, value in ranked_indices[
+                : self.config.candidate_cap_per_platform
+            ]:
                 chunk = index.chunks[chunk_index]
                 document = index.documents[chunk.review_id]
                 result.append(
@@ -472,12 +524,20 @@ class OpinionRetriever:
         return min(platform_count, self.config.first_stage_max_k, requested)
 
 
-def _log_candidates(index_id: str, round_number: int, candidates: Sequence[RetrievalCandidate]) -> None:
+def _log_candidates(
+    index_id: str, round_number: int, candidates: Sequence[RetrievalCandidate]
+) -> None:
     record_event(
-        "rag.retrieval_candidates", index_id=index_id, round=round_number,
+        "rag.retrieval_candidates",
+        index_id=index_id,
+        round=round_number,
         counts=dict(Counter(item.platform for item in candidates)),
-        candidates=[item.model_dump(include={"chunk_id", "review_id", "platform", "fusion_score"})
-                    for item in candidates],
+        candidates=[
+            item.model_dump(
+                include={"chunk_id", "review_id", "platform", "fusion_score"}
+            )
+            for item in candidates
+        ],
     )
 
 
@@ -502,15 +562,7 @@ def _add_ranking(
     rrf_k: int,
 ) -> None:
     for rank, chunk_index in enumerate(ranking, start=1):
-        fusion[chunk_index] = fusion.get(chunk_index, 0.0) + 1.0 / (
-            rrf_k + rank
-        )
-
-
-def _model_data(value: dict[str, Any] | BaseModel) -> dict[str, Any]:
-    if isinstance(value, BaseModel):
-        return value.model_dump()
-    return value
+        fusion[chunk_index] = fusion.get(chunk_index, 0.0) + 1.0 / (rrf_k + rank)
 
 
 __all__ = [

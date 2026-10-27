@@ -10,13 +10,19 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from app.rag.aggregation import LLMOpinionAggregator, OpinionAggregator
 from app.rag.embedding import LangChainEmbeddingProvider
 from app.rag.index import EphemeralRagStore, OpinionIndexBuilder
+from app.rag.reranker import LLMOpinionReranker
 from app.rag.retrieval import (
     LLMHydeGenerator,
     LLMRetrievalQueryPlanner,
     OpinionRetriever,
 )
-from app.rag.reranker import LLMOpinionReranker
-from config import API_MAX_RETRIES, API_TIMEOUT_SECONDS, DEFAULT_RAG_CONFIG, RagConfig, load_openai_api_key
+from config import (
+    API_MAX_RETRIES,
+    API_TIMEOUT_SECONDS,
+    DEFAULT_RAG_CONFIG,
+    RagConfig,
+    load_openai_api_key,
+)
 
 
 @dataclass(slots=True)
@@ -33,15 +39,21 @@ class RagRuntime:
         self.store.clear()
 
 
-def build_openai_chat_model(model: str, *, api_key: str, reasoning_effort: str | None = None, **kwargs) -> ChatOpenAI:
+def build_openai_chat_model(
+    model: str, *, api_key: str, reasoning_effort: str | None = None, **kwargs
+) -> ChatOpenAI:
     """Give the current mini model an explicit reasoning budget; callers can choose none."""
 
-    if reasoning_effort is None and (model == "gpt-5.4-mini" or model.startswith("gpt-5.4-mini-")):
+    if reasoning_effort is None and (
+        model == "gpt-5.4-mini" or model.startswith("gpt-5.4-mini-")
+    ):
         reasoning_effort = "medium"
     if "timeout" not in kwargs and "request_timeout" not in kwargs:
         kwargs["timeout"] = API_TIMEOUT_SECONDS
     kwargs.setdefault("max_retries", API_MAX_RETRIES)
-    return ChatOpenAI(model=model, api_key=api_key, reasoning_effort=reasoning_effort, **kwargs)
+    return ChatOpenAI(
+        model=model, api_key=api_key, reasoning_effort=reasoning_effort, **kwargs
+    )
 
 
 def build_openai_rag_runtime(

@@ -18,7 +18,6 @@ from app.web.adapter import AgentDriver, stage_label
 from app.web.contracts import CreateRun, Message, Outcome, Reply, Run, Session, Stage
 from app.web.store import SessionStore
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -47,11 +46,20 @@ class HostedSession:
 
 
 class SessionService:
-    def __init__(self, driver_factory: Callable[[str], AgentDriver], *, default_model: str,
-                 max_sessions: int = 50, data_dir: Path | None = None):
+    def __init__(
+        self,
+        driver_factory: Callable[[str], AgentDriver],
+        *,
+        default_model: str,
+        max_sessions: int = 50,
+        data_dir: Path | None = None,
+    ):
         self.driver_factory, self.default_model = driver_factory, default_model
         self.store = SessionStore(data_dir)
-        self.sessions = {view.id: HostedSession(view, requests=requests) for view, requests in self.store.load()}
+        self.sessions = {
+            view.id: HostedSession(view, requests=requests)
+            for view, requests in self.store.load()
+        }
         for hosted in self.sessions.values():
             self._interrupt(hosted)
         self.max_sessions = max_sessions
@@ -62,8 +70,12 @@ class SessionService:
         if len(self.sessions) >= self.max_sessions:
             raise SessionError(409, "会话数量已达上限，请先删除不用的会话。")
         stamp = now()
-        view = Session(id=uuid4().hex, model=(model or self.default_model).strip() or self.default_model,
-                       created_at=stamp, updated_at=stamp)
+        view = Session(
+            id=uuid4().hex,
+            model=(model or self.default_model).strip() or self.default_model,
+            created_at=stamp,
+            updated_at=stamp,
+        )
         self.store.save(view, {})
         self.sessions[view.id] = HostedSession(view)
         return view
@@ -79,11 +91,11 @@ class SessionService:
         if self._duplicate(hosted, request.request_id, content):
             return hosted.view
         self._idle(hosted)
-        if hosted.driver:
-            hosted.driver.close()
-            hosted.driver = None
+        self._close_driver(hosted)
         with self._change(hosted):
-            run = Run(id=uuid4().hex, query=request.query, status="queued", started_at=now())
+            run = Run(
+                id=uuid4().hex, query=request.query, status="queued", started_at=now()
+            )
             hosted.view.run = run
             hosted.last_reply = None
             if not hosted.view.messages:
@@ -91,14 +103,21 @@ class SessionService:
             self._message(hosted, "user", request.query)
             hosted.requests[fingerprint(request.request_id)] = (content, run.id)
             recorder = self._recorder(run)
-            recorder.event("run.queued", session_id=session_id, query=request.query, model=hosted.view.model)
+            recorder.event(
+                "run.queued",
+                session_id=session_id,
+                query=request.query,
+                model=hosted.view.model,
+            )
             logger.info("运行记录：%s", recorder.directory)
         hosted.task = asyncio.create_task(self._execute(hosted, run))
         return hosted.view
 
     def reply(self, session_id: str, run_id: str, reply: Reply) -> Session:
         hosted = self.get(session_id)
-        content = fingerprint("reply:" + run_id + ":" + reply.model_dump_json(exclude={"request_id"}))
+        content = fingerprint(
+            "reply:" + run_id + ":" + reply.model_dump_json(exclude={"request_id"})
+        )
         if self._duplicate(hosted, reply.request_id, content):
             return hosted.view
         run = self._run(hosted, run_id)
@@ -108,15 +127,32 @@ class SessionService:
         choices = {option.id: option.label for option in issue.choices}
         if reply.option_id and reply.option_id not in choices:
             raise SessionError(422, "请选择当前问题中的一个选项。")
-        if not reply.cancelled and not reply.option_id and not (reply.text or "").strip():
+        if (
+            not reply.cancelled
+            and not reply.option_id
+            and not (reply.text or "").strip()
+        ):
             raise SessionError(422, "请选择一项，或补充一些信息。")
-        text = "取消本次分析" if reply.cancelled else "\n".join(v for v in (choices.get(reply.option_id or "", ""), (reply.text or "").strip()) if v)
+        text = (
+            "取消本次分析"
+            if reply.cancelled
+            else "\n".join(
+                v
+                for v in (
+                    choices.get(reply.option_id or "", ""),
+                    (reply.text or "").strip(),
+                )
+                if v
+            )
+        )
         with self._change(hosted):
             self._message(hosted, "user", text)
             run.status, run.clarification = "queued", None
             hosted.requests[fingerprint(reply.request_id)] = (content, run.id)
             hosted.last_reply = reply
-            self._recorder(run).event("clarification.reply", reply=reply.model_dump(exclude={"request_id"}))
+            self._recorder(run).event(
+                "clarification.reply", reply=reply.model_dump(exclude={"request_id"})
+            )
         hosted.task = asyncio.create_task(self._execute(hosted, run, reply=reply))
         return hosted.view
 
@@ -128,14 +164,24 @@ class SessionService:
         with self._change(hosted):
             run.status, run.error, run.finished_at = "queued", None, None
             self._recorder(run).event("run.retry", restart=hosted.driver is None)
-        hosted.task = asyncio.create_task(self._execute(hosted, run, reply=hosted.last_reply))
+        hosted.task = asyncio.create_task(
+            self._execute(hosted, run, reply=hosted.last_reply)
+        )
         return hosted.view
 
     async def cancel(self, session_id: str, run_id: str) -> Session:
         hosted = self.get(session_id)
         run = self._run(hosted, run_id)
         if run.status == "waiting_for_input" and run.clarification:
-            return self.reply(session_id, run_id, Reply(request_id=uuid4().hex, issue_id=run.clarification.id, cancelled=True))
+            return self.reply(
+                session_id,
+                run_id,
+                Reply(
+                    request_id=uuid4().hex,
+                    issue_id=run.clarification.id,
+                    cancelled=True,
+                ),
+            )
         if run.status not in {"running", "queued"}:
             return hosted.view
         if hosted.task and not hosted.task.done():
@@ -145,9 +191,7 @@ class SessionService:
             raise SessionError(404, "会话已被删除。")
         if run.status == "cancelled":
             return hosted.view
-        if hosted.driver:
-            hosted.driver.close()
-            hosted.driver = None
+        self._close_driver(hosted)
         run.status, run.finished_at = "cancelled", now()
         recorder = self._recorder(run)
         recorder.event("run.cancelled")
@@ -162,9 +206,7 @@ class SessionService:
         if hosted.task and not hosted.task.done():
             hosted.task.cancel()
             await asyncio.gather(hosted.task, return_exceptions=True)
-        if hosted.driver:
-            hosted.driver.close()
-            hosted.driver = None
+        self._close_driver(hosted)
         try:
             self.store.delete(session_id)
         except Exception:
@@ -182,15 +224,19 @@ class SessionService:
             if hosted.task and not hosted.task.done():
                 hosted.task.cancel()
                 await asyncio.gather(hosted.task, return_exceptions=True)
-            if hosted.driver:
-                hosted.driver.close()
-                hosted.driver = None
+            self._close_driver(hosted)
             self._interrupt(hosted)
             async with hosted.condition:
                 hosted.condition.notify_all()
 
     def _recorder(self, run: Run) -> RunRecorder:
         return RunRecorder(run.id, data_dir=self.store.data_dir)
+
+    @staticmethod
+    def _close_driver(hosted: HostedSession) -> None:
+        if hosted.driver is not None:
+            hosted.driver.close()
+            hosted.driver = None
 
     def _interrupt(self, hosted: HostedSession) -> None:
         run = hosted.view.run
@@ -218,7 +264,11 @@ class SessionService:
 
     @staticmethod
     def _idle(hosted: HostedSession) -> None:
-        if hosted.view.run and hosted.view.run.status in {"running", "queued", "waiting_for_input"}:
+        if hosted.view.run and hosted.view.run.status in {
+            "running",
+            "queued",
+            "waiting_for_input",
+        }:
             raise SessionError(409, "请先完成或停止当前分析。")
 
     @staticmethod
@@ -229,7 +279,9 @@ class SessionService:
 
     @staticmethod
     def _message(hosted: HostedSession, role: str, text: str, **kwargs) -> None:
-        hosted.view.messages.append(Message(id=uuid4().hex, role=role, text=text, created_at=now(), **kwargs))
+        hosted.view.messages.append(
+            Message(id=uuid4().hex, role=role, text=text, created_at=now(), **kwargs)
+        )
 
     @contextmanager
     def _change(self, hosted: HostedSession):
@@ -258,13 +310,20 @@ class SessionService:
 
         asyncio.create_task(notify())
 
-    async def _execute(self, hosted: HostedSession, run: Run, *, reply: Reply | None = None) -> None:
+    async def _execute(
+        self, hosted: HostedSession, run: Run, *, reply: Reply | None = None
+    ) -> None:
         loop = asyncio.get_running_loop()
         driver = None
         task = asyncio.current_task()
 
         def update_stage(event: dict[str, Any]):
-            if hosted.closed or hosted.task is not task or hosted.view.run is not run or run.status != "running":
+            if (
+                hosted.closed
+                or hosted.task is not task
+                or hosted.view.run is not run
+                or run.status != "running"
+            ):
                 return
             label, phase = stage_label(event["label"]), event["phase"]
             if phase == "started":
@@ -273,31 +332,62 @@ class SessionService:
                 run.stages.append(Stage(id=uuid4().hex, label=label, status="running"))
                 run.stages[:] = run.stages[-80:]
             else:
-                stage = next((s for s in reversed(run.stages) if s.label == label and s.status == "running"), None)
+                stage = next(
+                    (
+                        s
+                        for s in reversed(run.stages)
+                        if s.label == label and s.status == "running"
+                    ),
+                    None,
+                )
                 if stage:
                     stage.status = "failed" if phase == "failed" else "completed"
                     stage.elapsed_seconds = event.get("elapsed_seconds")
             self._publish(hosted)
 
         try:
-            with record_run(run.id, data_dir=self.store.data_dir, session_id=hosted.view.id,
-                            query=run.query, model=hosted.view.model, entrypoint="web") as recorder:
+            with record_run(
+                run.id,
+                data_dir=self.store.data_dir,
+                session_id=hosted.view.id,
+                query=run.query,
+                model=hosted.view.model,
+                entrypoint="web",
+            ) as recorder:
                 async with self.worker:
-                    if hosted.closed or hosted.view.run is not run or run.status == "cancelled":
+                    if (
+                        hosted.closed
+                        or hosted.view.run is not run
+                        or run.status == "cancelled"
+                    ):
                         return
                     run.status = "running"
-                    run.stages.append(Stage(id=uuid4().hex, label="理解问题与规划任务", status="running"))
+                    run.stages.append(
+                        Stage(
+                            id=uuid4().hex, label="理解问题与规划任务", status="running"
+                        )
+                    )
                     self._publish(hosted)
                     if hosted.driver is None:
                         hosted.driver = self.driver_factory(hosted.view.model)
                     driver = hosted.driver
-                    with observe_progress(lambda event: loop.call_soon_threadsafe(update_stage, event)):
+                    with observe_progress(
+                        lambda event: loop.call_soon_threadsafe(update_stage, event)
+                    ):
                         thread_id = f"web:{hosted.view.id}:{run.id}"
-                        outcome = await (driver.reply(reply.model_dump(exclude={"request_id"}), thread_id=thread_id)
-                                         if reply else driver.run(run.query, thread_id=thread_id))
+                        outcome = await (
+                            driver.reply(
+                                reply.model_dump(exclude={"request_id"}),
+                                thread_id=thread_id,
+                            )
+                            if reply
+                            else driver.run(run.query, thread_id=thread_id)
+                        )
                     if not hosted.closed and hosted.view.run is run:
                         self._finish(hosted, outcome)
-                        recorder.event("run.outcome", status=run.status, outcome=outcome)
+                        recorder.event(
+                            "run.outcome", status=run.status, outcome=outcome
+                        )
                         recorder.write_result({"run": run, "outcome": outcome})
         except asyncio.CancelledError:
             if driver:
@@ -319,15 +409,23 @@ class SessionService:
     def _finish(self, hosted: HostedSession, outcome: Outcome) -> None:
         run = hosted.view.run
         for stage in run.stages:
-            if stage.status == "running" or (outcome.clarification and stage.status == "failed"):
+            if stage.status == "running" or (
+                outcome.clarification and stage.status == "failed"
+            ):
                 stage.status = "completed"
         if outcome.clarification:
             run.status, run.clarification = "waiting_for_input", outcome.clarification
-            self._message(hosted, "assistant", outcome.clarification.question, clarification=outcome.clarification)
+            self._message(
+                hosted,
+                "assistant",
+                outcome.clarification.question,
+                clarification=outcome.clarification,
+            )
         else:
-            run.status, run.finished_at = "cancelled" if outcome.cancelled else "completed", now()
+            run.status, run.finished_at = (
+                "cancelled" if outcome.cancelled else "completed",
+                now(),
+            )
             self._message(hosted, "assistant", outcome.text, report=outcome.report)
-            if hosted.driver:
-                hosted.driver.close()
-                hosted.driver = None
+            self._close_driver(hosted)
         self._publish(hosted)

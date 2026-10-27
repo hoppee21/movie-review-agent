@@ -17,8 +17,14 @@ def main():
     os.environ["AGENT_MODEL"] = args.model
     logging.basicConfig(level=logging.WARNING, format="[%(asctime)s] %(message)s")
     logging.getLogger("app").setLevel(logging.INFO)
-    uvicorn.run("app.web.server:create_app", factory=True, host=args.host, port=args.port,
-                reload=args.reload, timeout_graceful_shutdown=5)
+    uvicorn.run(
+        "app.web.server:create_app",
+        factory=True,
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        timeout_graceful_shutdown=5,
+    )
 
 
 if __name__ == "__main__":

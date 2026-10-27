@@ -1,15 +1,12 @@
 """结合上游电影上下文与用户补充理解需求，不重新识别电影。"""
 
 from collections.abc import Sequence
-from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from pydantic import BaseModel
 
 from app.agent.schemas.request import RequestAnalysis
-
 
 SYSTEM_PROMPT = """
 你只负责结合原始问题、澄清记录和电影上下文，理解用户想了解什么或想做什么。
@@ -34,24 +31,27 @@ class RequestAnalyzer:
             ]
         )
 
-        output = llm.with_structured_output(
+        structured_model = llm.with_structured_output(
             RequestAnalysis,
             method="json_schema",
             strict=True,
         )
 
-        self._chain = prompt | output
+        self._chain = prompt | structured_model
 
     async def analyze(
         self,
         user_query: str,
         movie_context: str,
         clarifications: Sequence[BaseMessage] = (),
-    ) -> dict[str, Any] | BaseModel:
+    ) -> RequestAnalysis:
         """保留原问题和澄清记录，用上游提供的电影名或标识符重述需求。"""
 
-        return await self._chain.ainvoke({
-            "user_query": user_query,
-            "movie_context": movie_context,
-            "clarifications": list(clarifications),
-        })
+        result = await self._chain.ainvoke(
+            {
+                "user_query": user_query,
+                "movie_context": movie_context,
+                "clarifications": list(clarifications),
+            }
+        )
+        return RequestAnalysis.model_validate(result)

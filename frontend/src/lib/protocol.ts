@@ -1,6 +1,13 @@
 /** Stable presentation models. No graph nodes or RAG implementation types. */
 export type Choice = { id: string; label: string; description: string };
 export type Clarification = { id: string; question: string; choices: Choice[] };
+export type ReplyBody = {
+  request_id: string;
+  issue_id: string;
+  option_id?: string;
+  text?: string;
+  cancelled?: boolean;
+};
 export type Source = {
   id: string; platform: string; title: string; quote: string; full_text: string;
   stance: string; reason: string | null; url: string | null; rating: number | null;
@@ -46,6 +53,39 @@ export const safeUrl = (value: unknown): string | null => {
 export function checkVersion(value: unknown) {
   const version = text(object(value).protocol_version, "1.0");
   if (version.split(".")[0] !== "1") throw new Error("服务接口已升级，请更新前端后重试。");
+}
+
+export function normalizeCapabilities(value: unknown): Capabilities {
+  checkVersion(value);
+  const input = object(value);
+  const limit = number(input.max_query_chars, 12000);
+  return {
+    default_model: text(input.default_model),
+    features: strings(input.features),
+    example_available: input.example_available === true,
+    max_query_chars: limit > 0 ? limit : 12000,
+  };
+}
+
+export function normalizeHistory(value: unknown): SessionItem[] {
+  return items(object(value).items).map(item => {
+    const input = object(item);
+    return {
+      id: text(input.id),
+      title: text(input.title, "新的分析"),
+      updated_at: text(input.updated_at),
+      status: text(input.status, "idle"),
+    };
+  }).filter(item => item.id);
+}
+
+export function updateHistory(current: SessionItem[], incoming: Session): SessionItem[] {
+  const previous = current.find(item => item.id === incoming.id);
+  if (previous && previous.updated_at > incoming.updated_at) return current;
+  return [
+    { id: incoming.id, title: incoming.title, updated_at: incoming.updated_at, status: incoming.run?.status || "idle" },
+    ...current.filter(item => item.id !== incoming.id),
+  ].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
 }
 
 export function normalizeClarification(value: unknown): Clarification | null {

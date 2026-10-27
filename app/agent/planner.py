@@ -1,10 +1,7 @@
 """LLM intent analysis followed by deterministic whitelist compilation."""
 
-from typing import Any
-
 from langchain_core.language_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
-from pydantic import BaseModel
 
 from app.agent.schemas import (
     Action,
@@ -14,7 +11,6 @@ from app.agent.schemas import (
     PlanStep,
     TaskType,
 )
-
 
 SYSTEM_PROMPT = """
 你只负责判断电影 Agent 应执行哪类任务，不直接选择或调用工具。
@@ -66,26 +62,29 @@ class PlanBuilder:
                 ),
             ]
         )
-        output = llm.with_structured_output(
+        structured_model = llm.with_structured_output(
             PlanIntent,
             method="json_schema",
             strict=True,
         )
-        self._chain = prompt | output
+        self._chain = prompt | structured_model
 
     async def analyze(
         self,
         question: str,
         movie_context: str,
-    ) -> dict[str, Any] | BaseModel:
-        return await self._chain.ainvoke(
+    ) -> PlanIntent:
+        result = await self._chain.ainvoke(
             {"question": question, "movie_context": movie_context}
         )
+        return PlanIntent.model_validate(result)
 
 
 def compile_plan(intent: PlanIntent, targets: list[MovieTarget]) -> ExecutionPlan:
     """Compile intent into stable target-bound steps without LLM tool choice."""
 
+    if not intent.platforms and intent.task != TaskType.UNSUPPORTED:
+        intent = intent.model_copy(update={"platforms": ["imdb", "douban"]})
     if len(targets) != 1:
         intent = PlanIntent(
             task=TaskType.UNSUPPORTED,

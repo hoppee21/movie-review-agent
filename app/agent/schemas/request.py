@@ -6,5 +6,5 @@ class RequestAnalysis(BaseModel):
 
     question: str = Field(
         min_length=1,
-        description="明确重述用户想了解的信息或执行的操作，保留平台、对象、方面和其他限制。"
+        description="明确重述用户想了解的信息或执行的操作，保留平台、对象、方面和其他限制。",
     )

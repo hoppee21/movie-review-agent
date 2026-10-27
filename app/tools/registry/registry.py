@@ -11,7 +11,6 @@ from app.agent.schemas import (
     ExecutionMode,
 )
 
-
 ActionHandler = Callable[[ActionInvocation, AgentState], Awaitable[ActionResult]]
 
 
@@ -49,9 +48,7 @@ class ActionRegistry:
     ) -> ActionRegistration | None:
         registration = self._items.get(action)
         if registration is not None and mode not in registration.modes:
-            raise PermissionError(
-                f"Action {action} is not allowed in {mode} mode"
-            )
+            raise PermissionError(f"Action {action} is not allowed in {mode} mode")
         return registration
 
     def __contains__(self, action: Action) -> bool:

@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.agent.schemas.plan import Action
 
-
 Invalidation = Literal["movie", "request", "plan", "execution"]
 
 

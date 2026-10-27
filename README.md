@@ -102,3 +102,17 @@ python -u -m app.web --model gpt-5.4-mini
 **前端：** React 18 · TypeScript · Vite  
 **后端：** FastAPI · LangGraph · LangChain · OpenAI
 
+## 代码检查
+
+开发环境额外安装 `requirements-dev.txt`。Python 使用 Ruff 统一格式和导入；TypeScript 检查严格类型、未使用的变量和参数。
+
+```bash
+ruff check app config.py
+ruff format --check app config.py
+python -m unittest discover -s tests
+npm --prefix frontend test
+npm --prefix frontend run build
+```
+
+测试使用本地假模型和临时数据，不会调用真实模型或采集评论。当前仓库规则将 `tests/` 和 `frontend/tests/` 留在本地；测试命令需在含这些目录的开发副本中运行。
+

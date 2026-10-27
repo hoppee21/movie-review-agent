@@ -1,16 +1,16 @@
 """Collect popular short comments from Douban."""
 
 import asyncio
-import json
+import logging
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from playwright.async_api import Locator, Page, async_playwright
 
-from config import load_source_cookie
+from app.tools.core.review_io import parse_cookie_header, save_reviews
 from app.tools.core.tool import Tool
-
+from config import load_source_cookie
 
 DOUBAN_ID = "1295644"
 TARGET_REVIEWS = 400
@@ -18,6 +18,7 @@ OUTPUT_FILE = "douban_top400_reviews.json"
 
 PAGE_SIZE = 20
 PAGE_DELAY_SECONDS = 10
+logger = logging.getLogger(__name__)
 
 
 class GetDoubanReviews(Tool):
@@ -40,7 +41,7 @@ class GetDoubanReviews(Tool):
     }
 
     async def execute(self, params: dict[str, Any]) -> dict[str, Any]:
-        douban_url = str(params.get("douban_url"))
+        douban_url = params.get("douban_url")
         subject_id = parse_douban_id(douban_url)
         output_path = Path(f"douban_reviews_{subject_id}.json")
         reviews = await collect_douban_reviews(douban_url, output_path)
@@ -76,19 +77,18 @@ async def collect_douban_reviews(
 
     comments: list[dict[str, Any]] = []
     seen: set[str] = set()
-    save_comments(output_path, comments)
+    save_reviews(output_path, comments)
 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=False)
-        context = await browser.new_context(locale="zh-CN")
-
-        cookie = load_source_cookie("douban")
-        if cookie:
-            await context.add_cookies(parse_cookie_header(cookie))
-
-        page = context.pages[0] if context.pages else await context.new_page()
-
         try:
+            context = await browser.new_context(locale="zh-CN")
+            cookie = load_source_cookie("douban")
+            if cookie:
+                await context.add_cookies(
+                    parse_cookie_header(cookie, domain=".douban.com")
+                )
+            page = await context.new_page()
             for start in range(0, limit, PAGE_SIZE):
                 response = await page.goto(
                     comments_url(subject_id, start),
@@ -109,15 +109,15 @@ async def collect_douban_reviews(
                 for index in range(count):
                     comment = await parse_comment(items.nth(index), subject_id)
                     key = comment["comment_id"] or comment["text"]
-                    if key in seen:
+                    if key in seen or not comment["text"]:
                         continue
                     seen.add(key)
                     comments.append(comment)
                     if len(comments) == limit:
                         break
 
-                save_comments(output_path, comments)
-                print(f"Collected {len(comments)}/{limit}")
+                save_reviews(output_path, comments)
+                logger.info("豆瓣已采集 %d/%d 条评论", len(comments), limit)
 
                 if len(comments) == limit:
                     break
@@ -152,14 +152,14 @@ async def parse_comment(item: Locator, subject_id: str) -> dict[str, Any]:
     }
 
 
-async def text(locator: Locator) -> Optional[str]:
+async def text(locator: Locator) -> str | None:
     if not await locator.count():
         return None
     value = (await locator.inner_text()).strip()
     return value or None
 
 
-async def attribute(locator: Locator, name: str) -> Optional[str]:
+async def attribute(locator: Locator, name: str) -> str | None:
     if not await locator.count():
         return None
     return await locator.get_attribute(name)
@@ -168,26 +168,6 @@ async def attribute(locator: Locator, name: str) -> Optional[str]:
 def check_access(page: Page) -> None:
     if "sec.douban.com" in page.url or "accounts.douban.com" in page.url:
         raise RuntimeError(f"Douban redirected to {page.url}")
-
-
-def parse_cookie_header(header: str) -> list[dict[str, str]]:
-    values = {}
-    for part in header.split(";"):
-        if "=" in part:
-            name, value = part.strip().split("=", 1)
-            values[name] = value.strip('"')
-
-    return [
-        {"name": name, "value": value, "domain": ".douban.com", "path": "/"}
-        for name, value in values.items()
-    ]
-
-
-def save_comments(path: Path, comments: list[dict[str, Any]]) -> None:
-    path.write_text(
-        json.dumps(comments, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
 
 
 async def main() -> None:
