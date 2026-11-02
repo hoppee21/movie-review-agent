@@ -3,18 +3,9 @@
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ReviewPlatform = Literal["imdb", "douban"]
-
-
-class QueryPurpose(StrEnum):
-    PRIMARY = "primary"
-    EXACT = "exact"
-    SUBASPECT = "subaspect"
-    POSITIVE = "positive"
-    NEGATIVE = "negative"
-    MIXED = "mixed"
 
 
 class OpinionStance(StrEnum):
@@ -37,7 +28,20 @@ class ReviewDocument(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ReviewChunk(BaseModel):
+class TextRange(BaseModel):
+    """Half-open character offsets into the unchanged review text."""
+
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def ordered(self):
+        if self.end <= self.start:
+            raise ValueError("Text range must have start < end")
+        return self
+
+
+class ReviewChunk(TextRange):
     chunk_id: str = Field(min_length=1)
     review_id: str = Field(min_length=1)
     platform: ReviewPlatform
@@ -77,7 +81,6 @@ class IndexArtifact(BaseModel):
 class QuerySpec(BaseModel):
     text: str = Field(min_length=1, max_length=500)
     platform: ReviewPlatform
-    purpose: QueryPurpose
 
     @field_validator("text")
     @classmethod
@@ -88,19 +91,7 @@ class QuerySpec(BaseModel):
 
 
 class RetrievalQueryPlan(BaseModel):
-    aspect: str | None
-    subaspects: list[str] = Field(max_length=6)
-    queries: list[QuerySpec] = Field(min_length=1, max_length=18)
-
-    @field_validator("aspect")
-    @classmethod
-    def clean_plan_aspect(cls, value: str | None) -> str | None:
-        return value.strip() if value and value.strip() else None
-
-    @field_validator("subaspects")
-    @classmethod
-    def unique_subaspects(cls, value: list[str]) -> list[str]:
-        return _unique_text(value)
+    queries: list[QuerySpec] = Field(max_length=4)
 
     @field_validator("queries")
     @classmethod
@@ -115,31 +106,6 @@ class RetrievalQueryPlan(BaseModel):
         return unique
 
 
-class CoverageGap(BaseModel):
-    platform: ReviewPlatform
-    kind: Literal["reviews", "subaspect", "reason", "comparison"]
-    subaspect: str | None = None
-    target: str | None = None
-
-
-class HydePassage(BaseModel):
-    gap_index: int = Field(
-        ge=1, description="One-based index of the supplied coverage gap."
-    )
-    text: str = Field(min_length=1, max_length=1500)
-
-    @field_validator("text")
-    @classmethod
-    def clean_passage(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("HyDE passage cannot be blank")
-        return value.strip()
-
-
-class HydePlan(BaseModel):
-    passages: list[HydePassage] = Field(max_length=6)
-
-
 class RetrievalCandidate(BaseModel):
     chunk_id: str
     review_id: str
@@ -150,6 +116,27 @@ class RetrievalCandidate(BaseModel):
     rating: float | None = None
     helpful_votes: int | None = None
     fusion_score: float
+    context_ranges: list[TextRange] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def ranges_within_review(self):
+        if any(span.end > len(self.full_text) for span in self.context_ranges):
+            raise ValueError("Reading context is outside the review")
+        return self
+
+    @property
+    def contexts(self) -> list[str]:
+        # Older saved evidence has no offsets; its original chunk remains auditable.
+        return [self.full_text[r.start : r.end] for r in self.context_ranges] or [
+            self.chunk_text
+        ]
+
+    def contains_quote(self, quote: str) -> bool:
+        return (
+            bool(quote)
+            and quote in self.full_text
+            and any(quote in text for text in self.contexts)
+        )
 
 
 class OpinionUnit(BaseModel):
@@ -199,22 +186,21 @@ class RankedEvidence(RetrievalCandidate, OpinionUnit):
 
 
 class CoverageReport(BaseModel):
+    """Source-count diagnostics, not a semantic guarantee of answer completeness."""
+
     minimum_reviews: int = Field(ge=1)
     sufficient: bool
     relevant_by_platform: dict[str, int]
     stance_counts: dict[str, dict[str, int]]
-    covered_subaspects: list[str]
-    missing_subaspects: list[str]
     missing_platforms: list[str]
     reason: str | None
-    missing_subaspects_by_platform: dict[str, list[str]] = Field(default_factory=dict)
-    gaps: list[CoverageGap] = Field(default_factory=list)
 
 
 class RetrievalResult(BaseModel):
     retrieval_id: str
     index_id: str
     question: str = Field(min_length=1)
+    aspect: str | None = None
     movie_context: str = ""
     platforms: list[ReviewPlatform] = Field(min_length=1, max_length=2)
     query_plan: RetrievalQueryPlan
@@ -359,6 +345,8 @@ class EvidenceCard(BaseModel):
     reason: str | None
     quote: str
     full_text: str
+    context_ranges: list[TextRange] = Field(default_factory=list)
+    title: str | None = None
     rating: float | None = None
     helpful_votes: int | None = None
 
@@ -389,15 +377,3 @@ class MovieAnswer(BaseModel):
     evidence: list[EvidenceCard]
     coverage: CoverageReport
     limitations: list[str]
-
-
-def _unique_text(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for raw_value in values:
-        value = raw_value.strip()
-        key = value.casefold()
-        if value and key not in seen:
-            seen.add(key)
-            result.append(value)
-    return result

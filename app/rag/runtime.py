@@ -12,7 +12,6 @@ from app.rag.embedding import LangChainEmbeddingProvider
 from app.rag.index import EphemeralRagStore, OpinionIndexBuilder
 from app.rag.reranker import LLMOpinionReranker
 from app.rag.retrieval import (
-    LLMHydeGenerator,
     LLMRetrievalQueryPlanner,
     OpinionRetriever,
 )
@@ -82,7 +81,6 @@ def build_openai_rag_runtime(
         embedder,
         LLMRetrievalQueryPlanner(llm),
         LLMOpinionReranker(llm, batch_size=config.rerank_batch_size),
-        LLMHydeGenerator(llm),
         config,
     )
     aggregator = LLMOpinionAggregator(llm)

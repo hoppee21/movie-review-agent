@@ -63,56 +63,5 @@
 | 报告导出 | 复制或下载包含证据编号的 Markdown |
 | 模型设置 | 设置新会话使用的模型，密钥由后端管理 |
 
-## 快速开始
 
-需要 **Python 3.11+（推荐 3.12）** 和 **Node.js 20.19+ 或 22.12+**。
-
-### 1. 安装运行依赖
-
-```bash
-git clone https://github.com/hoppee21/movie-review-agent.git
-cd movie-review-agent
-
-python -m pip install -r requirements.txt
-python -m playwright install chromium
-
-cp .env.example .env.local
-cp config/source_cookies.example.json config/source_cookies.json
-```
-
-在 `.env.local` 中填写 `OPENAI_API_KEY`。需要平台登录时，在本地 `config/source_cookies.json` 中填写自己的 Cookie。
-
-### 2. 构建界面
-
-```bash
-npm --prefix frontend ci
-npm --prefix frontend run build
-```
-
-### 3. 启动工作台
-
-```bash
-python -u -m app.web --model gpt-5.4-mini
-```
-
-打开 **http://127.0.0.1:8000**，输入电影问题即可开始。模型名称可改为你的 OpenAI 项目可调用的模型。
-
-## 技术栈
-
-**前端：** React 18 · TypeScript · Vite  
-**后端：** FastAPI · LangGraph · LangChain · OpenAI
-
-## 代码检查
-
-开发环境额外安装 `requirements-dev.txt`。Python 使用 Ruff 统一格式和导入；TypeScript 检查严格类型、未使用的变量和参数。
-
-```bash
-ruff check app config.py
-ruff format --check app config.py
-python -m unittest discover -s tests
-npm --prefix frontend test
-npm --prefix frontend run build
-```
-
-测试使用本地假模型和临时数据，不会调用真实模型或采集评论。当前仓库规则将 `tests/` 和 `frontend/tests/` 留在本地；测试命令需在含这些目录的开发副本中运行。
 

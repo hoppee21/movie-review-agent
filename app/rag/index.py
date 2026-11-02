@@ -23,6 +23,7 @@ from app.rag.models import (
     ReviewDocument,
     ReviewPlatform,
 )
+from app.rag.passages import split_review
 from app.run_log import record_event
 from config import RagConfig
 
@@ -244,16 +245,11 @@ class OpinionIndexBuilder:
         chunks: list[ReviewChunk] = []
         for document in documents.values():
             document_key = _document_key(document)
-            pieces = (
-                [document.text]
-                if document.platform == "douban"
-                else _split_imdb_text(
-                    document.text,
-                    self.config.imdb_chunk_chars,
-                    self.config.imdb_chunk_overlap,
-                )
+            pieces = split_review(
+                document.text, self.config.chunk_chars, self.config.chunk_overlap
             )
-            for position, piece in enumerate(pieces):
+            for position, span in enumerate(pieces):
+                piece = document.text[span.start : span.end]
                 embed_source = (
                     f"{document.title}\n\n{piece}" if document.title else piece
                 )
@@ -262,6 +258,8 @@ class OpinionIndexBuilder:
                         chunk_id=f"{document_key}:chunk-{position + 1}",
                         review_id=document_key,
                         platform=document.platform,
+                        start=span.start,
+                        end=span.end,
                         text=piece,
                         embed_text=embed_source[: self.config.embed_text_max_chars],
                     )
@@ -315,8 +313,8 @@ class OpinionIndexBuilder:
             json.dumps(
                 {
                     "embedding_model": self.embedder.name,
-                    "imdb_chunk_chars": self.config.imdb_chunk_chars,
-                    "imdb_chunk_overlap": self.config.imdb_chunk_overlap,
+                    "chunk_chars": self.config.chunk_chars,
+                    "chunk_overlap": self.config.chunk_overlap,
                     "embed_text_max_chars": self.config.embed_text_max_chars,
                 },
                 sort_keys=True,
@@ -393,36 +391,6 @@ def _normalize_document(
 
 def _document_key(document: ReviewDocument) -> str:
     return f"{document.platform}:{document.review_id}"
-
-
-def _split_imdb_text(text: str, size: int, overlap: int) -> list[str]:
-    """Split long reviews near whitespace while keeping bounded overlap."""
-
-    text = text.strip()
-    if len(text) <= size:
-        return [text]
-    chunks: list[str] = []
-    start = 0
-    while start < len(text):
-        hard_end = min(len(text), start + size)
-        end = hard_end
-        if hard_end < len(text):
-            boundary = max(
-                text.rfind("\n", start + size // 2, hard_end),
-                text.rfind(" ", start + size // 2, hard_end),
-            )
-            if boundary > start:
-                end = boundary
-        piece = text[start:end].strip()
-        if piece:
-            chunks.append(piece)
-        if end >= len(text):
-            break
-        next_start = max(end - overlap, start + 1)
-        while next_start < end and not text[next_start].isspace():
-            next_start += 1
-        start = next_start if next_start < end else end
-    return chunks
 
 
 def _normalized_matrix(
