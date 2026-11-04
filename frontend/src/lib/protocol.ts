@@ -10,7 +10,7 @@ export type ReplyBody = {
 };
 export type Source = {
   id: string; platform: string; title: string; quote: string; full_text: string;
-  stance: string; reason: string | null; url: string | null; rating: number | null;
+  stance: string | null; reason: string | null; url: string | null; rating: number | null;
 };
 export type Section = {
   id: string; title: string; body: string; citations: string[];
@@ -103,7 +103,7 @@ export function normalizeReport(value: unknown): Report | null {
   const sources = items(input.sources).map((item, index) => {
     const source = object(item);
     return { id: text(source.id, `source-${index}`), platform: text(source.platform, "来源"), title: text(source.title, "原始评论"),
-      quote: text(source.quote), full_text: text(source.full_text, text(source.quote)), stance: text(source.stance, "unclear"),
+      quote: text(source.quote), full_text: text(source.full_text, text(source.quote)), stance: text(source.stance) || null,
       reason: text(source.reason) || null, url: safeUrl(source.url), rating: typeof source.rating === "number" ? source.rating : null };
   });
   const validIds = new Set(sources.map(source => source.id));

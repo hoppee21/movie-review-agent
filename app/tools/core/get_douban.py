@@ -17,7 +17,7 @@ TARGET_REVIEWS = 400
 OUTPUT_FILE = "douban_top400_reviews.json"
 
 PAGE_SIZE = 20
-PAGE_DELAY_SECONDS = 10
+PAGE_DELAY_SECONDS = 5
 logger = logging.getLogger(__name__)
 
 

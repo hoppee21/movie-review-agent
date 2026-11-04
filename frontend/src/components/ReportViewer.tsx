@@ -61,7 +61,7 @@ export function EvidenceDrawer({ report, ids, onClose }: { report: Report; ids: 
   const number = report.sources.findIndex(item => item.id === source.id) + 1;
   return <Modal title="原始评论与证据" onClose={onClose} drawer>
     <div className="drawer-body"><div className="source-topline"><span className={`platform-badge ${source.platform.toLowerCase()}`}>{platformName(source.platform)}</span><span>证据 {number}</span></div>
-      <h2>{source.title}</h2><div className="source-meta"><span className={`stance ${source.stance}`}>{stanceName(source.stance)}</span>{source.rating !== null && <span>评论评分 {source.rating}</span>}</div>
+      <h2>{source.title}</h2><div className="source-meta">{source.stance && <span className={`stance ${source.stance}`}>{stanceName(source.stance)}</span>}{source.rating !== null && <span>评论评分 {source.rating}</span>}</div>
       <h4>引用片段</h4><blockquote>{source.quote}</blockquote>
       {source.reason && <div className="source-reason"><span>原文明示的理由 / 条件</span><p>{source.reason}</p></div>}
       <details className="full-review"><summary>完整原评论 <Icon name="chevron" size={15} /></summary><p>{source.full_text}</p></details>

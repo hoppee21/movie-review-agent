@@ -77,13 +77,10 @@ def report_from_answer(
             Source(
                 id=source_id,
                 platform=str(item.get("platform", "来源")),
-                title=" · ".join(
-                    str(v) for v in (item.get("target"), item.get("subaspect")) if v
-                )
-                or "原始评论",
+                title=str(item.get("title") or "原始评论"),
                 quote=str(item.get("quote", "")),
                 full_text=str(item.get("full_text") or item.get("quote", "")),
-                stance=str(item.get("stance", "unclear")),
+                stance=item.get("stance"),
                 reason=item.get("reason"),
                 rating=item.get("rating"),
             )
@@ -162,13 +159,21 @@ def report_from_answer(
         )
         for g in _items(coverage.get("gaps"))
     ]
+    gaps.extend(
+        f"{platform_names.get(platform, platform)} · 独立评论不足"
+        for platform in coverage.get("missing_platforms", [])
+        if isinstance(platform, str)
+    )
     return Report(
         title=title,
         summary=prose(answer.get("conclusion") or "已完成评论分析。"),
         citations=_refs(answer.get("conclusion_evidence_ids"), aliases),
         sections=sections,
         sources=sources,
-        source_counts=coverage.get("relevant_by_platform") or {},
+        source_counts=coverage.get(
+            "source_counts", coverage.get("relevant_by_platform")
+        )
+        or {},
         coverage_sufficient=coverage.get("sufficient"),
         gaps=gaps,
         limitations=[str(v) for v in answer.get("limitations", [])],

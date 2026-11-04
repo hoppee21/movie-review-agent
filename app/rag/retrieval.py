@@ -20,7 +20,7 @@ from app.rag.index import (
 )
 from app.rag.models import (
     QuerySpec,
-    RankedEvidence,
+    RankedPassage,
     RetrievalArtifact,
     RetrievalCandidate,
     RetrievalQueryPlan,
@@ -29,7 +29,7 @@ from app.rag.models import (
 )
 from app.rag.movie_context import MOVIE_CONTEXT_GUIDANCE
 from app.rag.passages import reading_ranges
-from app.rag.reranker import OpinionReranker
+from app.rag.reranker import PassageReranker
 from app.run_log import record_event
 from config import RagConfig
 
@@ -37,14 +37,17 @@ QUERY_SYSTEM_PROMPT = (
     """
 把用户的问题改写为这部电影的评论检索查询。IMDb 用英文，豆瓣用中文。
 保留用户明确指定的对象、方面、比较关系和限制；通常每个平台一条，必要时最多两条。
-可用电影背景核对名称和别名；宽问题不要擅自缩成只问某位主演。
-不要预设评价好坏、生成分析维度清单或编写假设评论。
+首次检索先参考所附维基百科条目，从中选择与问题直接相关的事实，把它们转成评论里可能出现的检索词。
+例如表演问题可用演员与角色的对应关系，场景或制作问题可用条目明确记载的场景或手法。
+宽问题保留覆盖整题的中性查询；有用的具体线索可另写一条。没有相关百科资料时按用户问题规划。
+evidence_focus 用一句话说明单条评论里要找什么直接评价、理由或条件，简短但直接的评价也有用。
+analysis_questions 最多两个，写成需要对照评论才能回答的开放问题，简单任务可为空。
+不能把百科中的动机、评价或技术细节写成预定结论，不能预设两平台存在差异。
 
-首次检索：为每个目标平台生成忠于问题的中性查询。
-补检索：阅读已有证据，只为阻碍回答用户问题的具体缺口生成定向查询。
-例如某平台无直接证据、用户明确询问理由却只有评价，或一个必要比较缺少对应证据。
-不为凑数量、预想分类、正反立场或每个偶然出现的演员补齐证据。
-已有证据足以在其范围内回答时，返回 queries=[]；找不到证据不代表评论者没有该观点。
+补检索对照首轮计划、百科背景和已选评论原文。只为影响回答的具体缺口生成定向查询。
+沿用首轮的重排重点，evidence_focus 留空。已有原文支持更具体的分析问题时更新 analysis_questions，
+否则留空以沿用首轮问题。证据足以在其范围内回答时返回 queries=[]，即使如此也可细化分析问题。
+不为凑数量、预想分类、正反立场或每个偶然出现的演员补齐证据。来源数量不代表语义覆盖完整。
 """.strip()
     + "\n\n"
     + MOVIE_CONTEXT_GUIDANCE
@@ -59,7 +62,8 @@ class RetrievalQueryPlanner(Protocol):
         aspect: str | None,
         platforms: Sequence[ReviewPlatform],
         movie_context: str = "",
-        evidence: Sequence[RankedEvidence] | None = None,
+        evidence: Sequence[RankedPassage] | None = None,
+        initial_plan: RetrievalQueryPlan | None = None,
     ) -> RetrievalQueryPlan: ...
 
 
@@ -71,7 +75,8 @@ class LLMRetrievalQueryPlanner:
                 (
                     "human",
                     "阶段：{stage}\n用户问题：{question}\n明确方面：{aspect}\n"
-                    "目标平台：{platforms}\n电影背景：{movie_context}\n已有证据：{evidence}",
+                    "目标平台：{platforms}\n维基百科资料：{movie_context}\n"
+                    "首轮计划：{initial_plan}\n已有评论原文：{evidence}",
                 ),
             ]
         )
@@ -88,7 +93,8 @@ class LLMRetrievalQueryPlanner:
         aspect: str | None,
         platforms: Sequence[ReviewPlatform],
         movie_context: str = "",
-        evidence: Sequence[RankedEvidence] | None = None,
+        evidence: Sequence[RankedPassage] | None = None,
+        initial_plan: RetrievalQueryPlan | None = None,
     ) -> RetrievalQueryPlan:
         stage = "首次检索" if evidence is None else "补检索（可返回空查询）"
         with progress(
@@ -101,19 +107,25 @@ class LLMRetrievalQueryPlanner:
                     "aspect": aspect or "以用户问题为准",
                     "platforms": ", ".join(platforms),
                     "movie_context": movie_context or "未提供电影背景",
+                    "initial_plan": initial_plan.model_dump_json()
+                    if initial_plan
+                    else "无",
                     "evidence": json.dumps(
-                        [
-                            {
-                                "platform": item.platform,
-                                "review_id": item.review_id,
-                                "target": item.target,
-                                "subaspect": item.subaspect,
-                                "opinion": item.opinion,
-                                "quote": item.evidence_span,
-                                "reason": item.reason,
-                            }
-                            for item in evidence or ()
-                        ],
+                        {
+                            "source_counts": dict(
+                                Counter(item.platform for item in evidence or ())
+                            ),
+                            "sources": [
+                                {
+                                    "source_id": item.source_id,
+                                    "platform": item.platform,
+                                    "review_id": item.review_id,
+                                    "title": item.title,
+                                    "contexts": item.contexts,
+                                }
+                                for item in evidence or ()
+                            ],
+                        },
                         ensure_ascii=False,
                     ),
                 }
@@ -127,7 +139,7 @@ class OpinionRetriever:
         store: EphemeralRagStore,
         embedder: EmbeddingProvider,
         query_planner: RetrievalQueryPlanner,
-        reranker: OpinionReranker,
+        reranker: PassageReranker,
         config: RagConfig,
     ) -> None:
         self.store, self.embedder = store, embedder
@@ -163,21 +175,23 @@ class OpinionRetriever:
             plan=query_plan,
         )
         queries = query_plan.queries
-        pool: list[RankedEvidence] = []
-        read: list[RetrievalCandidate] = []
-        evidence = []
+        rerank_query = question
+        if query_plan.evidence_focus:
+            rerank_query += f"\n评论检索重点：{query_plan.evidence_focus}"
+        evidence: list[RankedPassage] = []
         rounds = 0
         for round_number in range(1, self.config.max_retrieval_rounds + 1):
             excluded = {
                 i
                 for i, chunk in enumerate(index.chunks)
                 if any(
-                    item.review_id == chunk.review_id
+                    item.platform == chunk.platform
+                    and item.review_id == chunk.review_id
                     and any(
                         r.start <= chunk.start and chunk.end <= r.end
                         for r in item.context_ranges
                     )
-                    for item in read
+                    for item in evidence
                 )
             }
             if round_number > 1:
@@ -199,9 +213,18 @@ class OpinionRetriever:
                     platforms=available,
                     movie_context=movie_context,
                     evidence=evidence,
+                    initial_plan=query_plan,
                 )
                 queries = self._sanitize_query_plan(followup, available).queries
-                record_event("rag.followup_queries", queries=queries)
+                if followup.analysis_questions:
+                    query_plan = query_plan.model_copy(
+                        update={"analysis_questions": followup.analysis_questions}
+                    )
+                record_event(
+                    "rag.followup_queries",
+                    queries=queries,
+                    analysis_questions=query_plan.analysis_questions,
+                )
                 record_event(
                     "rag.followup_decision",
                     proceed=bool(queries),
@@ -214,28 +237,23 @@ class OpinionRetriever:
             _log_candidates(index_id, round_number, candidates)
             if round_number > 1 and not candidates:
                 break
-            pool.extend(
-                await self.reranker.rerank(
-                    question=question,
-                    aspect=aspect,
-                    candidates=candidates,
-                    known_scopes=list(
-                        dict.fromkeys((e.target, e.subaspect) for e in pool)
-                    ),
-                    movie_context=movie_context,
-                )
+            # Scores from separate rerank requests are not comparable. Re-score
+            # retained sources together with the follow-up hits before selecting.
+            candidates = self._merge_candidates(candidates, evidence)
+            pool = await self.reranker.rerank(
+                question=rerank_query,
+                aspect=aspect,
+                candidates=candidates,
             )
-            read.extend(candidates)
             evidence = select_evidence(
                 pool,
                 platforms=platforms,
                 limit_per_platform=self.config.final_evidence_per_platform,
-                minimum_reviews=self.config.min_relevant_per_platform,
             )
             coverage = coverage_report(
                 evidence,
                 platforms=platforms,
-                minimum=self.config.min_relevant_per_platform,
+                minimum=self.config.min_sources_per_platform,
             )
             rounds = round_number
             record_event(
@@ -274,7 +292,26 @@ class OpinionRetriever:
             queries.extend(matching[: self.config.max_query_rewrites])
             if not matching and question is not None:
                 queries.append(QuerySpec(text=question, platform=platform))
-        return RetrievalQueryPlan(queries=queries)
+        return plan.model_copy(update={"queries": queries})
+
+    def _merge_candidates(self, candidates, retained):
+        """Merge repeated reviews, prioritizing newly found reading windows."""
+        merged = {(item.platform, item.review_id): item for item in candidates}
+        for item in retained:
+            key = (item.platform, item.review_id)
+            if key not in merged:
+                merged[key] = RetrievalCandidate.model_validate(item.model_dump())
+                continue
+            current = merged[key]
+            if current.full_text != item.full_text:
+                raise ValueError("A review changed within one retrieval run")
+            ranges = reading_ranges(
+                current.full_text,
+                [*current.context_ranges, *item.context_ranges],
+                self.config.reading_context_chars,
+            )
+            merged[key] = current.model_copy(update={"context_ranges": ranges})
+        return list(merged.values())
 
     async def _hybrid_fusion(self, index, queries, excluded=()):
         fusion: dict[int, float] = {}

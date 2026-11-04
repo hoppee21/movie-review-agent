@@ -10,7 +10,7 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from app.rag.aggregation import LLMOpinionAggregator, OpinionAggregator
 from app.rag.embedding import LangChainEmbeddingProvider
 from app.rag.index import EphemeralRagStore, OpinionIndexBuilder
-from app.rag.reranker import LLMOpinionReranker
+from app.rag.reranker import AliyunReranker
 from app.rag.retrieval import (
     LLMRetrievalQueryPlanner,
     OpinionRetriever,
@@ -60,8 +60,9 @@ def build_openai_rag_runtime(
     *,
     config: RagConfig = DEFAULT_RAG_CONFIG,
     api_key: str | None = None,
+    rerank_api_key: str | None = None,
 ) -> RagRuntime:
-    """Wire OpenAI embeddings and LLM stages without making an API call."""
+    """Wire OpenAI embeddings/generation and Aliyun reranking without API calls."""
 
     embeddings = OpenAIEmbeddings(
         model=config.embedding_model,
@@ -80,7 +81,11 @@ def build_openai_rag_runtime(
         store,
         embedder,
         LLMRetrievalQueryPlanner(llm),
-        LLMOpinionReranker(llm, batch_size=config.rerank_batch_size),
+        AliyunReranker(
+            model=config.rerank_model,
+            endpoint=config.rerank_endpoint,
+            api_key=rerank_api_key,
+        ),
         config,
     )
     aggregator = LLMOpinionAggregator(llm)

@@ -32,7 +32,7 @@
 
 ### 点开引用，读到完整依据
 
-报告中的证据编号可以打开侧栏，查看评价对象、立场、逐字引文、理由或条件，并展开完整原评论。报告支持复制和下载 Markdown，导出时保留证据编号。
+报告中的证据编号可以打开侧栏，查看来源平台、逐字引文和原评论评分，并展开完整原评论。报告支持复制和下载 Markdown，导出时保留证据编号。
 
 ### 手机上，也能完整使用
 
@@ -58,10 +58,32 @@
 | 自然语言问题 | 输入片名、平台和关注方面；Enter 发送，Shift + Enter 换行 |
 | 动态澄清 | 选择候选、补充说明，然后继续当前分析 |
 | 运行进度 | 查看当前阶段和已完成步骤，支持停止与失败重试 |
-| 证据追溯 | 点开编号查看引文、理由和完整评论 |
+| 证据追溯 | 点开编号查看逐字引文和完整评论 |
 | 会话管理 | 搜索、切换和删除分析记录，刷新页面后继续查看 |
 | 报告导出 | 复制或下载包含证据编号的 Markdown |
 | 模型设置 | 设置新会话使用的模型，密钥由后端管理 |
 
+## 快速开始
 
+安装 Python 依赖后，参考 `.env.example` 在项目根目录 `.env.local` 配置 `OPENAI_API_KEY` 和 `DASHSCOPE_API_KEY`；阿里云密钥也可通过环境变量提供。参考 `config/source_cookies.example.json` 配置本地采集 Cookie。
 
+```bash
+pip install -r requirements.txt
+python -u -m app.agent --model gpt-5.4-mini \
+  '比较 IMDb 和豆瓣观众如何评价《黑客帝国》(1999) 的演员表演？'
+```
+
+网页工作台分别启动后端和前端：
+
+```bash
+python -u -m app.web --model gpt-5.4-mini
+```
+
+```bash
+npm --prefix frontend install
+npm --prefix frontend run dev
+```
+
+当前检索链路为 **BM25 + Dense → RRF → 阿里云 `qwen3.7-text-rerank` → 原文生成与引用复核**。重排使用北京区域接口，`config.py` 可配置模型与地址；不再逐批调用生成模型提取观点。OpenAI 仍负责向量化、查询规划和报告生成/复核。
+
+完整流程、证据边界和运行说明见 [Agent 说明](app/agent/README.md)。

@@ -52,7 +52,7 @@ class Source(BaseModel):
     title: str
     quote: str
     full_text: str
-    stance: str = "unclear"
+    stance: str | None = None
     reason: str | None = None
     url: str | None = None
     rating: float | None = None

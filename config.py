@@ -1,8 +1,10 @@
 """Read local credentials relative to the project root, not the working directory."""
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 
@@ -28,9 +30,10 @@ class RagConfig:
     bm25_b: float = 0.75
     rrf_k: int = 60
     candidate_cap_per_platform: int = 80
-    rerank_batch_size: int = 12
+    rerank_model: str = "qwen3.7-text-rerank"
+    rerank_endpoint: str = "https://cn-beijing.maas.qianwenaiapi.com/api/v1/services/rerank/text-rerank/text-rerank"
     final_evidence_per_platform: int = 12
-    min_relevant_per_platform: int = 6
+    min_sources_per_platform: int = 6
     max_retrieval_rounds: int = 2
 
     def __post_init__(self) -> None:
@@ -42,9 +45,8 @@ class RagConfig:
             "max_query_rewrites",
             "rrf_k",
             "candidate_cap_per_platform",
-            "rerank_batch_size",
             "final_evidence_per_platform",
-            "min_relevant_per_platform",
+            "min_sources_per_platform",
             "max_retrieval_rounds",
         )
         for field in positive_fields:
@@ -52,6 +54,16 @@ class RagConfig:
                 raise ValueError(f"{field} must be positive")
         if not self.embedding_model.strip():
             raise ValueError("embedding_model cannot be empty")
+        if not self.rerank_model.strip():
+            raise ValueError("rerank_model cannot be empty")
+        endpoint = urlparse(self.rerank_endpoint)
+        if (
+            endpoint.scheme != "https"
+            or not endpoint.hostname
+            or endpoint.username
+            or endpoint.password
+        ):
+            raise ValueError("rerank_endpoint must be an HTTPS URL without credentials")
         if not 0 <= self.chunk_overlap < self.chunk_chars:
             raise ValueError(
                 "chunk_overlap must be non-negative and smaller than chunk_chars"
@@ -64,9 +76,13 @@ class RagConfig:
             raise ValueError("bm25_k1 must be positive")
         if not 0 <= self.bm25_b <= 1:
             raise ValueError("bm25_b must be in [0, 1]")
-        if self.min_relevant_per_platform > self.final_evidence_per_platform:
+        if self.min_sources_per_platform > self.final_evidence_per_platform:
             raise ValueError(
-                "min_relevant_per_platform cannot exceed final_evidence_per_platform"
+                "min_sources_per_platform cannot exceed final_evidence_per_platform"
+            )
+        if self.candidate_cap_per_platform + self.final_evidence_per_platform > 500:
+            raise ValueError(
+                "rerank candidates plus retained sources cannot exceed 500 per platform"
             )
         if self.max_retrieval_rounds > 2:
             raise ValueError("max_retrieval_rounds cannot exceed 2")
@@ -81,6 +97,19 @@ def load_openai_api_key() -> str:
     value = dotenv_values(ENV_CONFIG_PATH).get("OPENAI_API_KEY")
     if not value or not value.strip():
         raise RuntimeError(f"OPENAI_API_KEY is not configured in {ENV_CONFIG_PATH}")
+    return value.strip()
+
+
+def load_dashscope_api_key() -> str:
+    """Prefer an exported DashScope key, otherwise use the local backend env file."""
+
+    value = os.getenv("DASHSCOPE_API_KEY") or dotenv_values(ENV_CONFIG_PATH).get(
+        "DASHSCOPE_API_KEY"
+    )
+    if not value or not value.strip():
+        raise RuntimeError(
+            "DASHSCOPE_API_KEY is not configured; set it in the environment or .env.local"
+        )
     return value.strip()
 
 

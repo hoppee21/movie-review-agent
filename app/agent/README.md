@@ -20,7 +20,7 @@ resolve_next / plan step
 - RequestAnalyzer 使用已选电影和澄清记录重述需求。
 - PlanBuilder 只输出 PlanIntent；确定性编译器负责生成白名单 Action。
 - Clarification 是 resolution 模式下的 Action，与普通执行共用 Registry 和 Executor。
-- [架构 FigJam](https://www.figma.com/board/VR3oajHfyJKe5Z5pjLRZHB) 已同步当前 RAG 流程；图 4–5 补充 LLM 调用 `ask_user` UI 工具的待实现设计。
+- [架构 FigJam](https://www.figma.com/board/VR3oajHfyJKe5Z5pjLRZHB) 记录了此前的 RAG 架构；当前实现以本说明和代码为准。图 4–5 补充 LLM 调用 `ask_user` UI 工具的待实现设计。
 - StatePatch 是 Action 修改 State 的唯一格式；Controller 根据 State 就绪程度路由，不保存 return_to。
 - 默认注册 resolve_movie 和 collect_movie_reviews；传入 RagRuntime 后，再以扩展方式注册 build/query/aggregate 三个观点 Action。
 - State 已使用 movie_targets 列表，但第一版只执行单目标；多个明确电影返回 unsupported。
@@ -102,13 +102,13 @@ Planner 的固定映射：
 评论检索前，按已确认的 Wikidata QID 读取对应 Wikipedia 条目（优先英文，无英文条目时用中文）。
 `app/rag/movie_context.py` 清理页面，保留简介、剧情、演员和制作章节，以及来源版本链接；
 各章节独立限长，节选会明确标注。成功结果按 QID 缓存在进程中，不增加图节点、向量索引或 LLM 摘要调用。
-这份 `movie_context` 贯穿查询改写、每批观点抽取、定向补检索、聚合和复核；全文背景随 RetrievalResult 留在进程内，State 仍只保存轻量检索结果。
+这份 `movie_context` 用于查询改写、定向补检索、聚合和复核；全文背景随 RetrievalResult 留在进程内，State 仍只保存轻量检索结果。
 读取失败记录 warning，并使用现有评论继续分析；无对应条目时不猜测页面。
 
-Prompt 的分工是：查询改写用背景扩展人物/角色称呼，重排核对指代与表演语境，
-聚合联系评论细节、评价标准和角色处境，复核分别检查电影事实、评论原意与分析推断。
-背景不能补造 `reason`、观众立场或平台差异，也不进入评论引用和覆盖计数。
-结合背景的解释需标明推断，并注明所用维基百科来源；评论的逐字引文与理由检查保持不变。
+Prompt 的分工是：查询改写用背景扩展人物/角色称呼，聚合联系评论细节、评价标准和角色处境，
+复核分别检查电影事实、评论原意与分析推断。阿里云 reranker 根据原问题、明确方面和计划中的单条评论检索重点给候选原文排序。
+背景不能补造观众立场或平台差异，也不进入评论引用和覆盖计数。
+结合背景的解释需标明推断，并注明所用维基百科来源；引用仍须逐字存在于实际提供的评论阅读范围。
 
 ~~~text
 collected JSON → normalize / deduplicate → paragraph / sentence passages + source offsets
@@ -119,7 +119,7 @@ question → neutral queries in each platform's language
     ↓
 BM25 + Dense → RRF → group hits by review → bounded source reading windows
     ↓
-extract observed opinions / reasons / quotes → select writing evidence
+Aliyun reranker → select original review contexts by platform
     ↓
 optional question-specific queries → at most one hybrid follow-up on unread text
     ↓
@@ -128,26 +128,37 @@ generate cited claims → audit with the same reading context → assemble answe
 
 - 两个平台共用按实际长度决定的切分规则。默认片段最多 1800 字符，优先段落、其次句末，长度兜底；重叠最多约 200 字符，优先完整句子。完整评论不变，`start/end` 是原文中的半开区间。
 - Embedding 仍使用标题与片段（最多 2000 字符）。BM25、精确向量搜索和 RRF 保留；索引只存在于本次运行时的内存中。
-- 查询计划只有 `queries[{platform,text}]`，每平台通常一条、最多两条。删除 `purpose` 和计划中的 `subaspects`；用户明确指定的对象、方面、关系与限制始终传给后续模型。
+- 规划器参考维基百科条目中与问题相关的演员、角色、场景或制作信息，生成各平台的 `queries`（每平台最多两条）、单条评论的检索重点 `evidence_focus`，以及最多两个需要对照评论验证的 `analysis_questions`。
 - 每个检索通道最多接纳 80 条独立评论的命中，融合后每平台最多阅读 80 条评论。多次命中不累加为一条评论的额外票数，按其最高片段融合分排序。
 - 同条评论的命中片段优先合并，再用剩余预算补充相邻句子。每条评论的阅读范围合计最多 3600 字符；短评直接读全文，长评的远处命中保持分开的范围，不伪造成连续原文。
-- 抽取模型收到标题和 `contexts`；每条候选最多提取六个 `OpinionUnit`。`subaspect` 是从实际观点归纳的标签，既可复用已有同义标签，也可新增。后续批次仅接收已经通过原文校验的对象和方面。
-- 每条引文必须位于一个连续阅读范围内，同时存在于完整原文；`reason` 必须原样出现在引文中。不能因为提供了更多上下文，就借用另一对象或另一观点的细节。
-- 最终每平台最多 12 个观点，优先保证独立来源，保留实际发现的不同立场及带理由的证据；没有分类填空或强制正反配额。重叠片段中的重复观点去重，同一评论的不同观点可以共存。
-- `coverage` 只报告独立评论数量与立场计数，`sufficient` 表示达到配置中的最低来源数（默认 6），不承诺语义上回答完整。不同观点属于同一原评论时只计一次，冲突立场记为 mixed；这些计数不能代表平台总体分布。
-- 首轮后，若仍有未阅读文本且有预算，复用查询生成器阅读已有引文与理由，判断用户问题的哪些具体要求仍缺证据；足够则返回空查询。不会因为未达到数量阈值、缺少模型预设维度或偶然出现的新演员而强制补检索。
-- 补检索使用普通查询和同样的 BM25 + Dense + RRF，最多一次，不再生成 HyDE 假设评论。排除已完整阅读的片段，同一长评未读部分仍可检索；合并两轮观点后重新选择最终证据。
-- 生成和复核读取相同的原文上下文、引文和电影背景。实际发现的方面用来组织回答，不作为白名单。`both_platforms` 只说明该对象有双方来源，不意味着所有观点可比。
-- 代码校验引用存在、支持/反证不重叠、跨平台引用具有双方同对象证据，以及 insight 具有理由、解释和限制。评价含义是否对应、反证是否相关由已有复核调用根据原文判定，不用自由生成的方面标签做严格字符串配对。
-- 固定一次生成和一次复核，判断采用 `keep/revise/drop`；修订只能使用原判断已有引用，可收窄为单平台 finding。复核后重算来源计数，不启动新一轮检索。
-- EvidenceCard 保留完整原文、逐字引文、阅读范围和稳定的引用编号；旧报告没有阅读范围时仍可展示。LangGraph State 只存索引/检索 ID 和最终产物，完整运行时数据在任务结束时释放。
+- 阿里云 `qwen3.7-text-rerank` 对每个平台的候选原文单独排序；两个平台可并发请求。没有逐批 LLM 观点抽取，也不预生成 `target/subaspect/stance/reason` 标签。
+- 每平台最多保留 12 条独立评论的阅读范围，供生成与复核使用。同一评论不会因为命中多个片段而占用多个来源名额。
+- `coverage.source_counts` 只统计独立评论，`sufficient` 表示达到配置中的最低来源数（默认 6），不承诺语义完整、证据正确或代表平台总体。
+- 若仍有未读文本和检索预算，规划器结合首轮计划、百科资料和选中评论判断具体缺口。即使无需补检索，也可根据已读原文细化分析问题，供生成与复核共同使用。
+- 补检索沿用 BM25 + Dense + RRF，最多一次。只有已选中供生成模型阅读的范围会被排除；仅参与重排但未选中的评论仍可被新的查询命中。
+- 重排分数只在同一次请求内用于比较。同一平台的已选来源与新候选合并后重新请求重排，再选最终来源，不直接混用两轮分数。
+- 生成模型一次性输出判断及其逐字引文；复核读取相同原文范围、电影背景和判断，检查评价对象、含义、条件、推断边界与反证关系。
+- 代码检查来源 ID、引文是否同时存在于完整原文和一个连续阅读范围、支持与反证是否重复、跨平台判断是否具有双方支持，以及 insight 是否包含解释与限制。不会把重排分数当作观点可信度。
+- 固定一次生成和一次复核，采用 `keep/revise/drop`；修订只能使用原判断已有的来源与引文，可收窄为单平台 finding。通过复核的判断直接组装报告，不再自由改写。
+- 复核后只按实际引用且仍有效的独立评论重算来源数量。同一原评论的不同引文可以形成不同 EvidenceCard，但不会增加独立评论数。
+- EvidenceCard 保留完整原文、逐字引文、阅读范围、原评论 ID 和稳定引用编号。LangGraph State 只存索引/检索 ID 和最终产物，完整运行时数据在任务结束时释放。
 
 ## 配置与运行
 
-OpenAI Key 从项目根目录 .env.local 读取；IMDb/豆瓣 Cookie 从 config/source_cookies.json 读取。源码和测试不会打印凭据。
+`OPENAI_API_KEY` 从项目根目录 `.env.local` 读取，用于向量化、查询规划、生成和复核。
+`DASHSCOPE_API_KEY` 优先从进程环境读取，其次读取 `.env.local`，只用于阿里云重排；密钥缺失会在实际重排时明确报错。
+IMDb/豆瓣 Cookie 从 `config/source_cookies.json` 读取。源码和测试不会打印凭据。
 
-CLI 将阶段、向量批次、观点抽取批次、聚合和复核的开始/完成及耗时写入 stderr，最终答案仍写入 stdout。
-`Collected 400/400` 只是豆瓣采集进度，随后还有向量化、分批模型分析和复核。
+`config.py` 的默认 `rerank_model` 为 `qwen3.7-text-rerank`，`rerank_endpoint` 为：
+
+~~~text
+https://cn-beijing.maas.qianwenaiapi.com/api/v1/services/rerank/text-rerank/text-rerank
+~~~
+
+请求按平台发送 `input.query/documents`，`top_n` 等于该平台候选数，关闭原文回传；响应的索引必须唯一、完整且合法，相关性分数必须为 0–1 的有限数。单请求超时 60 秒，网络错误、429 与 5xx 最多重试一次；不会把接口错误伪装为空证据。
+
+CLI 将阶段、向量批次、重排、聚合和复核的开始/完成及耗时写入 stderr，最终答案仍写入 stdout。
+`Collected 400/400` 只是豆瓣采集进度，随后还有向量化、相关性重排、报告生成和复核。
 `config.py` 中 `API_TIMEOUT_SECONDS=180`、`API_MAX_RETRIES=1` 同时控制默认聊天模型和向量接口；
 这是单次请求的等待设置，整个多批流程可能更长。调用 `build_openai_chat_model` 时可通过 `timeout` / `request_timeout`、`max_retries` 显式覆盖。
 
@@ -167,7 +178,7 @@ conda run --no-capture-output -n Agent \
 conda run -n Agent python -m unittest discover -s tests -v
 ~~~
 
-测试使用受控 LLM 回复和 fake Tool，覆盖 schema、计划编译、Registry 权限、Patch 失效、interrupt/resume、线程隔离、失败重试，以及链接解析和评论采集的完整编排。测试不会访问 OpenAI、Wikidata、Wikipedia、IMDb 或豆瓣，也不会写正式评论文件。
+测试使用受控 LLM 回复和 fake Tool，覆盖 schema、计划编译、Registry 权限、Patch 失效、interrupt/resume、线程隔离、失败重试，以及链接解析和评论采集的完整编排。测试不会访问 OpenAI、阿里云、Wikidata、Wikipedia、IMDb 或豆瓣，也不会写正式评论文件。
 
 真实模型的局部回放可复用 CLI 保存的 JSON（也支持带终端前后缀的日志），避免重新采集：
 
@@ -177,6 +188,6 @@ python -m tests.replay_opinion_answer saved-output.txt \
   --output reports/answer-replay.json
 ~~~
 
-该命令使用 `.env.local` 调用模型，只在已保存引文附近的原文范围内重跑查询改写、抽取与聚合；不验证完整召回率、补检索或采集效果。每个已完成阶段立即落盘，包含查询计划、原始重排、观点短编号映射、复核前覆盖、初稿、逐条复核及最终答案。只有 `status=completed` 表示回放完整结束。可通过 `--reuse-retrieval reports/answer-replay.json` 复用相同问题的新版观点提取结果，只重跑生成与复核。
+该命令调用阿里云重排和 OpenAI 生成/复核，只使用已保存引文附近的原文；不验证完整召回率、补检索或采集效果。阶段结果立即落盘，包含重排分数、原文来源、复核前覆盖、初稿、逐条复核及最终答案。只有 `status=completed` 表示回放完整结束。可通过 `--reuse-retrieval reports/answer-replay.json` 复用相同问题、来源和阅读范围的新版重排结果，只重跑生成与复核。旧的观点抽取结果不能复用。
 
 回答质量诊断与回放记录保存在本地 `reports/` 中，不随源码发布。

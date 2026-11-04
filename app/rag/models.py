@@ -1,18 +1,10 @@
 """Typed contracts shared by the transient movie-opinion RAG pipeline."""
 
-from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ReviewPlatform = Literal["imdb", "douban"]
-
-
-class OpinionStance(StrEnum):
-    POSITIVE = "positive"
-    NEGATIVE = "negative"
-    MIXED = "mixed"
-    UNCLEAR = "unclear"
 
 
 class ReviewDocument(BaseModel):
@@ -91,7 +83,21 @@ class QuerySpec(BaseModel):
 
 
 class RetrievalQueryPlan(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     queries: list[QuerySpec] = Field(max_length=4)
+    evidence_focus: str = Field(
+        default_factory=str,
+        max_length=300,
+        description="What to look for in a single review when reranking.",
+    )
+    analysis_questions: list[Annotated[str, Field(min_length=1, max_length=240)]] = (
+        Field(
+            default_factory=list,
+            max_length=2,
+            description="Open questions about relationships to verify across the selected reviews.",
+        )
+    )
 
     @field_validator("queries")
     @classmethod
@@ -139,50 +145,11 @@ class RetrievalCandidate(BaseModel):
         )
 
 
-class OpinionUnit(BaseModel):
-    """One judgement about one target and dimension, grounded in a literal span."""
+class RankedPassage(RetrievalCandidate):
+    """An original review context ranked for relevance, not an extracted opinion."""
 
-    target: str = Field(min_length=1, max_length=120)
-    subaspect: str = Field(min_length=1, max_length=120)
-    opinion: str = Field(min_length=1, max_length=400)
-    relevance: int = Field(ge=0, le=3)
-    stance: OpinionStance
-    reason: str | None = Field(
-        max_length=600,
-        description="Literal reason or condition within evidence_span; null for bare judgements.",
-    )
-    evidence_span: str = Field(min_length=1, max_length=800)
-
-    @field_validator("target", "subaspect", "opinion", "evidence_span")
-    @classmethod
-    def clean_text(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("opinion fields cannot be blank")
-        return value.strip()
-
-    @field_validator("reason")
-    @classmethod
-    def clean_reason(cls, value: str | None) -> str | None:
-        return value.strip() if value and value.strip() else None
-
-    @property
-    def evidence_quality(self) -> int:
-        return 2 if self.reason and self.reason in self.evidence_span else 1
-
-
-class RerankJudgement(BaseModel):
-    chunk_id: str
-    opinions: list[OpinionUnit] = Field(max_length=6)
-
-
-class RerankResponse(BaseModel):
-    items: list[RerankJudgement]
-
-
-class RankedEvidence(RetrievalCandidate, OpinionUnit):
-    """An opinion with its source metadata; one chunk may produce several units."""
-
-    evidence_id: str
+    source_id: str = Field(min_length=1)
+    rerank_score: float = Field(ge=0, le=1, allow_inf_nan=False)
 
 
 class CoverageReport(BaseModel):
@@ -190,8 +157,7 @@ class CoverageReport(BaseModel):
 
     minimum_reviews: int = Field(ge=1)
     sufficient: bool
-    relevant_by_platform: dict[str, int]
-    stance_counts: dict[str, dict[str, int]]
+    source_counts: dict[str, int]
     missing_platforms: list[str]
     reason: str | None
 
@@ -204,7 +170,7 @@ class RetrievalResult(BaseModel):
     movie_context: str = ""
     platforms: list[ReviewPlatform] = Field(min_length=1, max_length=2)
     query_plan: RetrievalQueryPlan
-    evidence: list[RankedEvidence]
+    evidence: list[RankedPassage]
     coverage: CoverageReport
     rounds: int = Field(ge=1)
 
@@ -286,14 +252,26 @@ class AggregateOpinionsInput(BaseModel):
         return value.strip()
 
 
+class ClaimCitation(BaseModel):
+    source_id: str = Field(min_length=1, description="Input source alias, e.g. e1.")
+    quote: str = Field(min_length=1, max_length=800)
+
+    @field_validator("source_id", "quote")
+    @classmethod
+    def clean_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("citation fields cannot be blank")
+        return value.strip()
+
+
 class AnswerClaim(BaseModel):
     """One reviewable statement, before it is placed in the public answer."""
 
     kind: Literal["finding", "insight", "comparison"]
     statement: str = Field(min_length=1, max_length=600)
     reasoning: str | None = Field(max_length=1000)
-    evidence_ids: list[str] = Field(min_length=1, max_length=24)
-    counterevidence_ids: list[str] = Field(max_length=24)
+    citations: list[ClaimCitation] = Field(min_length=1, max_length=24)
+    countercitations: list[ClaimCitation] = Field(max_length=24)
     limitation: str | None = Field(max_length=400)
 
 
@@ -309,11 +287,8 @@ class ClaimReview(BaseModel):
 
 
 class ClaimAudit(BaseModel):
-    invalid_evidence_ids: list[str] = Field(
-        description="Evidence unrelated to the question or misattributed to its target/dimension."
-    )
-    unsupported_reason_ids: list[str] = Field(
-        description="Relevant evidence whose reason is only a judgement, plot description or invented explanation; clear the reason, retain the opinion."
+    invalid_source_ids: list[str] = Field(
+        description="Source aliases with no review content relevant to the question."
     )
     reviews: list[ClaimReview] = Field(max_length=12)
 
@@ -335,14 +310,10 @@ class EvidenceCard(BaseModel):
         description="Answer-local short citation, mapped to the persistent evidence_id."
     )
     evidence_id: str
+    source_id: str
     chunk_id: str
     platform: ReviewPlatform
     review_id: str
-    target: str
-    subaspect: str
-    opinion: str
-    stance: OpinionStance
-    reason: str | None
     quote: str
     full_text: str
     context_ranges: list[TextRange] = Field(default_factory=list)
@@ -354,7 +325,6 @@ class EvidenceCard(BaseModel):
 class OpinionCluster(BaseModel):
     label: str
     summary: str
-    stance: OpinionStance
     platforms: list[ReviewPlatform]
     evidence_count: int = Field(
         ge=0,
@@ -369,9 +339,6 @@ class MovieAnswer(BaseModel):
     conclusion_evidence_ids: list[str] = Field(default_factory=list)
     clusters: list[OpinionCluster]
     insights: list[OpinionInsight] = Field(default_factory=list, max_length=4)
-    stance_counts: dict[str, dict[str, int]] = Field(
-        description="Distinct reviews in the final evidence; conflicting opinions count as mixed."
-    )
     platform_comparison: str | None
     platform_comparison_evidence_ids: list[str] = Field(default_factory=list)
     evidence: list[EvidenceCard]
